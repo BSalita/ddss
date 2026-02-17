@@ -9,7 +9,7 @@ Machine: 32-core, 64-bit Windows, MSVC 19.43
 |---|---|---|---|
 | Full-deal exact correctness parity | `exact_match == 1.0` | `1.0` on all tested configs (100-10000 deals) | PASS |
 | Full-deal exact path | Runtime tag `CPU_EXACT` | `CPU_EXACT` on all tested configs | PASS |
-| >= 2x performance vs OOB DDS | >= 2x faster than cloned GitHub repo | **~7x vs OOB-MT** / **~17x vs OOB-ST** (1000 deals, verified) | **PASS** |
+| >= 2x performance vs OOB DDS | >= 2x faster than cloned GitHub repo | **3x @8thr / 5.5x @16thr / 7x @32thr vs OOB-MT** / **~17x vs OOB-ST** (1000 deals, verified) | **PASS** |
 | Tooling reliability | One-command build + smoke test | `run_all.bat` end-to-end | PASS |
 | Arbitrary batch size support | No rebuild needed for different sizes | **Dynamic API** (`CalcAllTablesPBNx`) | **PASS** |
 
@@ -53,15 +53,14 @@ int CalcAllTablesPBNx(
 
 ### Benchmark: dynamic API throughput (single build)
 
-All rows: same binary, `DDS_THREADING=STL`, 32-thread multi-threaded, all optimizations, OOB-verified correct.
+All rows: same binary, `DDS_THREADING=STL`, all optimizations, OOB-verified correct.
 
-| Deals | Tables/s |
-|---:|---:|
-| 100 | 133 |
-| 320 (PBN) | 108 |
-| 1,000 | 149 |
+| Deals | 8 threads | 16 threads | 32 threads |
+|---:|---:|---:|---:|
+| 320 (PBN) | 56.8 tbl/s | 97.0 tbl/s | 108 tbl/s |
+| 1,000 | 60.9 tbl/s | 111.0 tbl/s | 149 tbl/s |
 
-Throughput increases with deal count because larger runs amortize per-batch overhead. No crashes at any size -- the old `MAXNOOFTABLES=5000` stack overflow is eliminated.
+Throughput increases with deal count because larger runs amortize per-batch overhead. Thread scaling is near-linear from 8→16 (~1.8x) with diminishing returns from 16→32 (~1.3x). No crashes at any size -- the old `MAXNOOFTABLES=5000` stack overflow is eliminated.
 
 ---
 
@@ -112,16 +111,23 @@ Machine: 32-core, 192GB RAM, 64-bit Windows, MSVC 19.43. DDS 2.9.0 fork with STL
 | Threading | Time (ms) | Tables/s | Solutions/s |
 |-----------|----------:|---------:|------------:|
 | ST (1 thread) | 117,768 | 8.5 | 170 |
+| MT (8 threads) | 16,426 | 60.9 | 1,218 |
+| MT (16 threads) | 9,008 | 111.0 | 2,220 |
 | MT (32 threads) | 6,713 | 149 | 2,979 |
-| **MT speedup** | | **17.5x** | |
+| **8→16 speedup** | | **1.82x** | |
+| **16→32 speedup** | | **1.34x** | |
+| **ST→32 speedup** | | **17.5x** | |
 
-**OOB cross-verification** (`--verify --oob-dll`, fresh upstream `dds-bridge/dds` build):
+**OOB cross-verification** (`--verify`, fresh upstream `dds-bridge/dds` build):
 
-| Test | Deals | Cells | Mismatches | ddss (tbl/s) | OOB (tbl/s) | Speedup |
-|------|------:|------:|-----------:|-------------:|------------:|--------:|
-| random-deals | 100 | 2,000 | **0** | 133 | 13 | 10.2x |
-| random-deals | 1,000 | 20,000 | **0** | 149 | 20 | 7.1x |
-| PBN Camrose | 320 | 6,400 | **0** | 108 | 19 | 5.8x |
+| Test | Threads | Deals | Cells | Mismatches | ddss (tbl/s) | OOB (tbl/s) | Speedup |
+|------|--------:|------:|------:|-----------:|-------------:|------------:|--------:|
+| random-deals | 8 | 1,000 | 20,000 | **0** | 60.9 | 20.1 | 3.03x |
+| random-deals | 16 | 1,000 | 20,000 | **0** | 111.0 | 20.3 | 5.48x |
+| random-deals | 32 | 1,000 | 20,000 | **0** | 149 | 20 | 7.1x |
+| PBN Camrose | 8 | 320 | 6,400 | **0** | 56.8 | 19.6 | 2.90x |
+| PBN Camrose | 16 | 320 | 6,400 | **0** | 97.0 | 19.8 | 4.89x |
+| PBN Camrose | 32 | 320 | 6,400 | **0** | 108 | 19 | 5.8x |
 
 ### Observations
 
@@ -129,7 +135,8 @@ Machine: 32-core, 192GB RAM, 64-bit Windows, MSVC 19.43. DDS 2.9.0 fork with STL
 - **Multi-hand solve mode (`largest.txt`) shows good MT scaling** because DDS can overlap the 21 hands across 32 threads.
 - **`thomas2` is the extreme outlier**: ~70 seconds for a single hand (solve), ~282 seconds for a full DD table (calc). This is a known property of the interlocking 7-6 distribution which creates a combinatorially explosive alpha-beta tree. No known DD solver handles this hand quickly.
 - **Random-deal throughput** (1000 deals) shows **17.5x MT speedup** from 32-thread batched solving. This is higher than previous measurements because a correctness fix in `Scheduler.cpp` (strain comparison in `SameHand` and `FinetuneGroups`) now correctly solves all 5 strains per deal instead of incorrectly deduplicating them.
-- **OOB cross-verification** confirms 100% correctness against fresh upstream `dds-bridge/dds` builds across all tested configurations. The ddss fork's batched API is **5.8-10.2x faster** than the upstream DLL's serial `CalcDDtablePBN`, both using 32 threads.
+- **Thread scaling**: 8→16 threads gives ~1.82x speedup (near-linear). 16→32 threads gives ~1.34x (diminishing returns from memory bandwidth / contention). At 16 threads ddss already achieves 111 tables/s -- 5.5x faster than OOB at 32 threads.
+- **OOB cross-verification** confirms 100% correctness against fresh upstream `dds-bridge/dds` builds across all tested configurations (8, 16, and 32 threads). The ddss fork's batched API is **2.9-7.1x faster** than the upstream DLL's serial `CalcDDtablePBN` depending on thread count, with ddss at 8 threads already outperforming OOB at 32 threads.
 
 ---
 
