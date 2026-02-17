@@ -70,7 +70,7 @@ All platforms use the same CMake workflow.  The build produces two artifacts:
 mkdir build && cd build
 
 # Multi-threaded with all optimizations
-cmake -DDDS_THREADING=STL -DDDS_AGGRESSIVE_OPT=ON -DDDS_BATCH_FALLBACKS=ON ..
+cmake -DDDS_THREADING=STL -DDDS_AGGRESSIVE_OPT=ON ..
 cmake --build . --config Release
 ```
 
@@ -87,7 +87,6 @@ cmake --build . --config Release
 |--------|--------|---------|-------------|
 | `DDS_THREADING` | `NONE`, `STL`, `OPENMP`, `WINAPI` | `STL` | Threading backend. `STL` recommended for all platforms. |
 | `DDS_AGGRESSIVE_OPT` | `ON`/`OFF` | `OFF` | Enables `/Ox /GL /LTCG` (MSVC) or `-O3 -flto -march=native` (GCC/Clang). |
-| `DDS_BATCH_FALLBACKS` | `ON`/`OFF` | `OFF` | Batch CPU fallback solves in compare paths. |
 
 No `MAXNOOFTABLES`, `MAXNOOFBOARDS`, or stack-size overrides are needed.  One build handles any batch size.
 
@@ -95,13 +94,13 @@ No `MAXNOOFTABLES`, `MAXNOOFBOARDS`, or stack-size overrides are needed.  One bu
 
 **Windows (MSVC):**
 ```
-"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DDDS_THREADING=STL -DDDS_AGGRESSIVE_OPT=ON -DDDS_BATCH_FALLBACKS=ON ..
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DDDS_THREADING=STL -DDDS_AGGRESSIVE_OPT=ON ..
 cmake --build . --config Release
 ```
 
 **Linux:**
 ```bash
-cmake -DDDS_THREADING=STL -DDDS_AGGRESSIVE_OPT=ON -DDDS_BATCH_FALLBACKS=ON ..
+cmake -DDDS_THREADING=STL -DDDS_AGGRESSIVE_OPT=ON ..
 make -j$(nproc)
 ```
 Requires `pthreads` (for `std::thread`) and `libdl` (for `dlopen`).  Both are auto-detected by CMake.
@@ -116,10 +115,10 @@ make -j$(sysctl -n hw.ncpu)
 
 ```bash
 # Quick smoke test with a PBN URL
-./dtest --pbn-source https://raw.githubusercontent.com/ContractBridge/pbn-files/refs/heads/master/1997-Cavendish_Invitational_Pairs_Tournament/ROUND1.PBN --backend compare --compare-target exact --report-dir smoke_test
+./dtest --pbn-source https://raw.githubusercontent.com/ContractBridge/pbn-files/refs/heads/master/1997-Cavendish_Invitational_Pairs_Tournament/ROUND1.PBN --report-dir smoke_test
 
 # Random deals benchmark
-./dtest --random-deals 1000 --backend compare --compare-target all --report-dir benchmark
+./dtest --random-deals 1000 --report-dir benchmark
 ```
 
 
@@ -182,13 +181,10 @@ The `dtest` program supports DDS solver testing, random deal generation, PBN eva
 | `-t` | `--threading` | `t` | `default` | Threading backend: `default`, `none`, `winapi`, `openmp`, `gcd`, `boost`, `stl`, `tbb`, `stlimpl`, `pplimpl`. |
 | `-n` | `--numthr` | `n` | `0` | Maximum number of threads (`0` = DDS decides). |
 | `-m` | `--memory` | `n` | `0` | Total DDS memory in MB (`0` = DDS decides). |
-| `-b` | `--backend` | `b` | `cpu` | Backend: `cpu`, `compare`. |
-| `-r` | `--random-deals` | `n` | `0` | Generate `n` random deals and solve through selected backend (`0` = disabled). |
+| `-r` | `--random-deals` | `n` | `0` | Generate `n` random deals and solve (`0` = disabled). |
 | `-k` | `--reduced-cards` | `n` | `13` | Cards per hand in random-deals mode (`1..13`). |
 | `-e` | `--seed` | `n` | `42` | Random seed for deal generation. |
-| `-c` | `--compare-target` | `t` | `all` | In compare mode: `fast`, `hybrid`, `exact`, `all`. |
-| `-q` | `--confidence-threshold` | `x` | `0.95` | Hybrid fallback confidence gate (`0.0..1.0`). |
-| `-g` | `--report-dir` | `p` | `dds_compare_reports` | Output directory for compare/benchmark reports (JSON, CSV). |
+| `-g` | `--report-dir` | `p` | `dds_compare_reports` | Output directory for reports (JSON, CSV). |
 | `-p` | `--pbn-source` | `s` | *(none)* | Local PBN file path or URL. Enables PBN evaluation mode. |
 | `-w` | `--html-report` | `f` | *(none)* | Write a readable HTML report file (intended for PBN evaluation mode). |
 
@@ -197,24 +193,18 @@ Run `dtest` with no arguments to see the built-in help text.
 ### Examples
 
 ```bash
-# Compare all backends on random deals
-./dtest --random-deals 10000 --backend compare --compare-target all \
-  --confidence-threshold 0.95 --report-dir dds_compare_reports --seed 42
+# Random deals benchmark
+./dtest --random-deals 10000 --report-dir dds_compare_reports --seed 42
 
 # PBN source mode (local file) with HTML report
-./dtest --pbn-source ../hands/list100.txt --backend compare --compare-target all \
+./dtest --pbn-source ../hands/list100.txt \
   --report-dir pbn_reports --html-report pbn_reports/report.html
 
 # PBN source mode (URL)
-./dtest --pbn-source https://example.com/deals.pbn --backend compare \
-  --compare-target all --report-dir pbn_reports_url
-
-# CPU-only exact benchmark
-./dtest --random-deals 1000 --backend cpu --report-dir cpu_bench
+./dtest --pbn-source https://example.com/deals.pbn --report-dir pbn_reports_url
 
 # Reduced-endgame test (4 cards/hand)
-./dtest --random-deals 1000 --reduced-cards 4 --backend compare \
-  --compare-target exact --report-dir endgame_test
+./dtest --random-deals 1000 --reduced-cards 4 --report-dir endgame_test
 ```
 
 Windows helper scripts (`.bat`)
@@ -228,7 +218,7 @@ These scripts live in the repository root and are intended for Windows CMD use.
   * Output binary: `build-cmake\Release\dtest.exe`.
 
 * `smoke_test.bat`
-  * Runs a single compare-all smoke test using `build-cmake\Release\dtest.exe`
+  * Runs a PBN smoke test using `build-cmake\Release\dtest.exe`
     with a PBN URL source and HTML output.
   * Writes artifacts to `smoke_probe`.
 

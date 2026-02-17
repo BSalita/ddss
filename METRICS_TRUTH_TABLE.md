@@ -10,8 +10,6 @@ Machine: 32-core, 64-bit Windows, MSVC 19.43
 | Full-deal exact correctness parity | `exact_match == 1.0` | `1.0` on all tested configs (100-10000 deals) | PASS |
 | Full-deal exact path | Runtime tag `CPU_EXACT` | `CPU_EXACT` on all tested configs | PASS |
 | >= 2x performance vs OOB DDS | >= 2x faster than cloned GitHub repo | **~36x vs OOB-MT** / **~84x vs OOB-ST** | **PASS** |
-| Fast mode quality (strict cell exact) | >= 95% exact cell match | 21.8% on smoke set | NOT MET |
-| Hybrid mode quality | Exact parity vs CPU | `1.0` exact match | PASS |
 | Tooling reliability | One-command build + smoke test | `run_all.bat` end-to-end | PASS |
 | Arbitrary batch size support | No rebuild needed for different sizes | **Dynamic API** (`CalcAllTablesPBNx`) | **PASS** |
 
@@ -256,7 +254,7 @@ These do not change the API contract but may affect observable behavior:
 
 ```bash
 # Standard build -- handles any number of deals automatically
-cmake -DDDS_THREADING=STL -DDDS_AGGRESSIVE_OPT=ON -DDDS_BATCH_FALLBACKS=ON ..
+cmake -DDDS_THREADING=STL -DDDS_AGGRESSIVE_OPT=ON ..
 
 # OOB-ST equivalent (single-threaded, for comparison only)
 cmake -DDDS_THREADING=NONE ..
@@ -408,7 +406,6 @@ No `_pack_` attribute is needed in the `ctypes.Structure` definitions. If DDS is
 - **OOB-ST** = single-threaded DDS as cloned, no changes. **OOB-MT** = same code, built with `-DDDS_THREADING=STL`.
 - Both OOB modes use serial `CalcDDtablePBN` (one deal per call). The batch API exists in OOB DDS but the test harness didn't use it.
 - All speedups are cumulative from the specified baseline unless stated otherwise.
-- Fast mode's 21.8% accuracy is inherent to the heuristic kernel, not a regression from our changes.
 - The `HASH_MAX` bug exists in upstream DDS -- it would crash any application sending >~125 deals per `CalcAllTablesPBN` batch, even without our changes.
 - **Strain grouping** is the single largest optimization found (3.5x). It works because DDS resets the transposition table on every trump change, but when all 5 strains of a deal are solved consecutively on the same thread, the card distribution data stays hot in CPU cache.
 - **Persistent thread pool** gives ~10% on top. Thread creation/destruction cost is ~10-100us per thread, multiplied by 32 threads and multiple batches per run.

@@ -36,7 +36,7 @@ struct optEntry
   unsigned numArgs;
 };
 
-#define DTEST_NUM_OPTIONS 14
+#define DTEST_NUM_OPTIONS 11
 
 const optEntry optList[DTEST_NUM_OPTIONS] =
 {
@@ -45,12 +45,9 @@ const optEntry optList[DTEST_NUM_OPTIONS] =
   {"t", "threading", 1},
   {"n", "numthr", 1},
   {"m", "memory", 1},
-  {"b", "backend", 1},
   {"r", "random-deals", 1},
   {"k", "reduced-cards", 1},
   {"e", "seed", 1},
-  {"c", "compare-target", 1},
-  {"q", "confidence-threshold", 1},
   {"g", "report-dir", 1},
   {"p", "pbn-source", 1},
   {"w", "html-report", 1}
@@ -77,20 +74,6 @@ const vector<string> threadingList =
   "STLIMPL",
   "PPLIMPL",
   "default"
-};
-
-const vector<string> backendList =
-{
-  "cpu",
-  "compare"
-};
-
-const vector<string> compareList =
-{
-  "fast",
-  "hybrid",
-  "exact",
-  "all"
 };
 
 string shortOptsAll, shortOptsWithArg;
@@ -132,11 +115,7 @@ void Usage(
     "-m, --memory n     Total DDS memory size in MB.\n" <<
     "                   (Default: 0 meaning that DDS decides)\n" <<
     "\n" <<
-    "-b, --backend b    One of: cpu, compare.\n" <<
-    "                   (Default: cpu)\n" <<
-    "\n" <<
-    "-r, --random-deals n  Generate n random deals and solve\n" <<
-    "                   through selected backend flow.\n" <<
+    "-r, --random-deals n  Generate n random deals and solve.\n" <<
     "                   (Default: 0 meaning disabled)\n" <<
     "\n" <<
     "-k, --reduced-cards n Cards per hand in random-deals mode.\n" <<
@@ -146,15 +125,7 @@ void Usage(
     "-e, --seed n       Random seed for generated deals.\n" <<
     "                   (Default: 42)\n" <<
     "\n" <<
-    "-c, --compare-target t  In compare mode: fast, hybrid,\n" <<
-    "                   exact, all.\n" <<
-    "                   (Default: all)\n" <<
-    "\n" <<
-    "-q, --confidence-threshold x  Hybrid fallback threshold\n" <<
-    "                   in [0.0, 1.0].\n" <<
-    "                   (Default: 0.95)\n" <<
-    "\n" <<
-    "-g, --report-dir p Directory for compare reports.\n" <<
+    "-g, --report-dir p Directory for reports.\n" <<
     "                   (Default: dds_compare_reports)\n" <<
     "\n" <<
     "-p, --pbn-source s Local PBN file path or URL.\n" <<
@@ -224,12 +195,9 @@ void SetDefaults()
   options.threading = DTEST_THREADING_DEFAULT;
   options.numThreads = 0;
   options.memoryMB = 0;
-  options.backend = DTEST_BACKEND_CPU;
-  options.compareTarget = DTEST_COMPARE_ALL;
   options.randomDeals = 0;
   options.reducedCards = 13;
   options.randomSeed = 42;
-  options.confidenceThreshold = 0.95;
   options.reportDir = "dds_compare_reports";
   options.pbnSource = "";
   options.htmlReport = "";
@@ -249,18 +217,12 @@ void PrintOptions()
     options.numThreads << "\n";
   cout << setw(12) << "memory" << setw(12) <<  
     options.memoryMB << " MB\n";
-  cout << setw(12) << "backend" << setw(12) <<
-    backendList[options.backend] << "\n";
   cout << setw(12) << "deals" << setw(12) <<
     options.randomDeals << "\n";
   cout << setw(12) << "red-cards" << setw(12) <<
     options.reducedCards << "\n";
   cout << setw(12) << "seed" << setw(12) <<
     options.randomSeed << "\n";
-  cout << setw(12) << "compare" << setw(12) <<
-    compareList[options.compareTarget] << "\n";
-  cout << setw(12) << "confidence" << setw(12) <<
-    options.confidenceThreshold << "\n";
   cout << setw(12) << "reports" << setw(12) <<
     options.reportDir << "\n";
   cout << setw(12) << "pbn-source" << setw(12) <<
@@ -291,7 +253,6 @@ void ReadArgs(
   SetDefaults();
 
   int c, m = 0;
-  double d = 0.0;
   bool errFlag = false, matchFlag;
   string stmp;
   char * ctmp;
@@ -395,32 +356,6 @@ void ReadArgs(
         options.memoryMB = m;
         break;
 
-      case 'b':
-        matchFlag = false;
-        stmp = optarg;
-        transform(stmp.begin(), stmp.end(), stmp.begin(), ::tolower);
-
-        for (unsigned i = 0; i < DTEST_BACKEND_SIZE && ! matchFlag; i++)
-        {
-          string s = backendList[i];
-          transform(s.begin(), s.end(), s.begin(), ::tolower);
-          if (stmp == s)
-          {
-            m = static_cast<int>(i);
-            matchFlag = true;
-          }
-        }
-
-        if (matchFlag)
-          options.backend = static_cast<DdsBackend>(m);
-        else
-        {
-          cout << "Backend '" << optarg << "' not found\n";
-          nextToken -= 2;
-          errFlag = true;
-        }
-        break;
-
       case 'r':
         m = static_cast<int>(strtol(optarg, &ctmp, 0));
         if (m < 0)
@@ -446,43 +381,6 @@ void ReadArgs(
       case 'e':
         m = static_cast<int>(strtol(optarg, &ctmp, 0));
         options.randomSeed = m;
-        break;
-
-      case 'c':
-        matchFlag = false;
-        stmp = optarg;
-        transform(stmp.begin(), stmp.end(), stmp.begin(), ::tolower);
-
-        for (unsigned i = 0; i < DTEST_COMPARE_SIZE && ! matchFlag; i++)
-        {
-          string s = compareList[i];
-          transform(s.begin(), s.end(), s.begin(), ::tolower);
-          if (stmp == s)
-          {
-            m = static_cast<int>(i);
-            matchFlag = true;
-          }
-        }
-
-        if (matchFlag)
-          options.compareTarget = static_cast<CompareTarget>(m);
-        else
-        {
-          cout << "Compare target '" << optarg << "' not found\n";
-          nextToken -= 2;
-          errFlag = true;
-        }
-        break;
-
-      case 'q':
-        d = strtod(optarg, &ctmp);
-        if (d < 0.0 || d > 1.0)
-        {
-          cout << "Confidence threshold must be in [0.0, 1.0]\n\n";
-          nextToken -= 2;
-          errFlag = true;
-        }
-        options.confidenceThreshold = d;
         break;
 
       case 'g':
@@ -513,4 +411,3 @@ void ReadArgs(
     exit(0);
   }
 }
-

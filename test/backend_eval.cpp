@@ -2,7 +2,7 @@
    DDS, a bridge double dummy solver.
 
    Backend evaluation helpers:
-   random deal generation, fast/hybrid/exact backends, and reports.
+   random deal generation, CPU exact solving, and reports.
 */
 
 #include "backend_eval.h"
@@ -43,16 +43,6 @@ namespace
     int rank;
   };
 
-  struct TargetResult
-  {
-    string name;
-    vector<ddTableResults> tables;
-    vector<array<double, 20> > confidence;
-    double elapsedMs;
-    int cpuFallbackDeals;
-    string runtimeTag;
-  };
-
   static const char SEAT_CHARS[DDS_HANDS] = {'N', 'E', 'S', 'W'};
   static const char RANK_CHARS[13] = {'A', 'K', 'Q', 'J', 'T', '9', '8', '7',
     '6', '5', '4', '3', '2'};
@@ -62,18 +52,6 @@ namespace
     const int x,
     const int lo,
     const int hi)
-  {
-    if (x < lo)
-      return lo;
-    if (x > hi)
-      return hi;
-    return x;
-  }
-
-  inline double clamp_double(
-    const double x,
-    const double lo,
-    const double hi)
   {
     if (x < lo)
       return lo;
@@ -105,38 +83,8 @@ namespace
   {
     if (done == total)
       return true;
-    const int step = max(1, total / 20); // 5% increments
+    const int step = max(1, total / 20);
     return (done % step) == 0;
-  }
-
-  string RuntimeTagFast(
-    const int totalDeals)
-  {
-    return "CPU_FAST_HEURISTIC";
-  }
-
-  string RuntimeTagHybrid(
-    const int fallbackDeals,
-    const int totalDeals)
-  {
-    ostringstream oss;
-    if (fallbackDeals > 0)
-      oss << "CPU_HYBRID+CPU_FALLBACK(fallback_deals=" << fallbackDeals << "/" << totalDeals << ")";
-    else
-      oss << "CPU_HYBRID_ONLY(fallback_deals=0/" << totalDeals << ")";
-    return oss.str();
-  }
-
-  string RuntimeTagExact(
-    const int cpuFallbackDeals)
-  {
-    if (cpuFallbackDeals <= 0)
-      return "CPU_EXACT";
-    {
-      ostringstream oss;
-      oss << "CPU_EXACT(deals=" << cpuFallbackDeals << ")";
-      return oss.str();
-    }
   }
 
   string SeatOrderPBN(
@@ -179,20 +127,6 @@ namespace
     }
 
     return hand;
-  }
-
-  int HcpFromRank(
-    const int rank)
-  {
-    if (rank == 14)
-      return 4;
-    if (rank == 13)
-      return 3;
-    if (rank == 12)
-      return 2;
-    if (rank == 11)
-      return 1;
-    return 0;
   }
 
   bool MakeDirIfNeeded(
@@ -266,168 +200,27 @@ namespace
     return true;
   }
 
-  void SolveFastHeuristic(
-    const RandomDeal& deal,
-    ddTableResults& table,
-    array<double, 20>& confidence)
-  {
-    for (int strain = 0; strain < DDS_STRAINS; strain++)
-    {
-      for (int declarer = 0; declarer < DDS_HANDS; declarer++)
-      {
-        const int partner = (declarer + 2) % DDS_HANDS;
-        const int hcpSide = deal.hcp[declarer] + deal.hcp[partner];
-
-        double fitBonus = 0.0;
-        int fit = 0;
-        if (strain < DDS_SUITS)
-        {
-          fit = deal.suitLen[declarer][strain] + deal.suitLen[partner][strain];
-          if (fit >= 8)
-            fitBonus = 0.7 + 0.35 * static_cast<double>(fit - 8);
-          else
-            fitBonus = -0.25 * static_cast<double>(8 - fit);
-        }
-
-        double raw = 6.0 + 0.22 * static_cast<double>(hcpSide - 20) + fitBonus;
-        const int tricks = clamp_int(static_cast<int>(floor(raw + 0.5)), 0, 13);
-        table.resTable[strain][declarer] = tricks;
-
-        double conf = 0.35 + min(0.45, 0.04 * static_cast<double>(abs(hcpSide - 20)));
-        if (strain < DDS_SUITS)
-        {
-          if (fit >= 8)
-            conf += 0.2;
-          else
-            conf -= 0.15;
-        }
-        const double boundary = fabs(raw - floor(raw + 0.5));
-        conf -= 0.4 * boundary;
-        confidence[4 * strain + declarer] = clamp_double(conf, 0.05, 0.99);
-      }
-    }
-  }
-
-  void SolveHybrid(
-    const RandomDeal& deal,
-    const double threshold,
-    ddTableResults& outTable,
-    array<double, 20>& confidence,
-    int& fallbackCells,
-    bool& usedFallback)
-  {
-    SolveFastHeuristic(deal, outTable, confidence);
-
-    bool anyFallback = false;
-    bool replaceMask[20];
-    for (int i = 0; i < 20; i++)
-    {
-      replaceMask[i] = confidence[i] < threshold;
-      if (replaceMask[i])
-      {
-        anyFallback = true;
-        fallbackCells++;
-      }
-    }
-
-    if (! anyFallback)
-    {
-      usedFallback = false;
-      return;
-    }
-
-    ddTableResults exactTable;
-    const int ret = SolveCpuExact(deal.deal, exactTable);
-    if (ret != RETURN_NO_FAULT)
-    {
-      usedFallback = false;
-      return;
-    }
-
-    for (int strain = 0; strain < DDS_STRAINS; strain++)
-    {
-      for (int declarer = 0; declarer < DDS_HANDS; declarer++)
-      {
-        const int idx = 4 * strain + declarer;
-        if (replaceMask[idx])
-          outTable.resTable[strain][declarer] = exactTable.resTable[strain][declarer];
-      }
-    }
-    usedFallback = true;
-  }
-
-  int ContractValue(
-    const ddTableResults& t)
-  {
-    int best = t.resTable[0][0];
-    for (int strain = 0; strain < DDS_STRAINS; strain++)
-      for (int declarer = 0; declarer < DDS_HANDS; declarer++)
-        best = max(best, t.resTable[strain][declarer]);
-    return best;
-  }
-
-  int ParProxy(
-    const ddTableResults& t)
-  {
-    int low = t.resTable[0][0];
-    int high = t.resTable[0][0];
-    for (int strain = 0; strain < DDS_STRAINS; strain++)
-    {
-      for (int declarer = 0; declarer < DDS_HANDS; declarer++)
-      {
-        low = min(low, t.resTable[strain][declarer]);
-        high = max(high, t.resTable[strain][declarer]);
-      }
-    }
-    return high - low;
-  }
-
   void WriteSummaryJson(
     const string& path,
-    const string& target,
     const int deals,
     const int cells,
+    const int mismatches,
     const double exactRate,
     const double mae,
-    const double off1,
-    const double off2,
-    const double contractDisagreement,
-    const double parDisagreement,
     const double elapsedMs,
     const double tablesPerSec,
-    const double solutionsPerSec,
-    const string& runtimeTag,
-    const vector<string>& failures)
+    const double solutionsPerSec)
   {
     ofstream f(path.c_str());
     f << "{\n";
-    f << "  \"compare_target\": \"" << target << "\",\n";
     f << "  \"num_deals\": " << deals << ",\n";
     f << "  \"num_cells\": " << cells << ",\n";
+    f << "  \"mismatches\": " << mismatches << ",\n";
     f << "  \"exact_match_rate\": " << fixed << setprecision(8) << exactRate << ",\n";
     f << "  \"mae\": " << mae << ",\n";
-    f << "  \"off_by_one_rate\": " << off1 << ",\n";
-    f << "  \"off_by_two_plus_rate\": " << off2 << ",\n";
-    f << "  \"contract_disagreement_rate\": " << contractDisagreement << ",\n";
-    f << "  \"par_disagreement_rate\": " << parDisagreement << ",\n";
     f << "  \"elapsed_ms\": " << elapsedMs << ",\n";
     f << "  \"dd_tables_per_sec\": " << tablesPerSec << ",\n";
-    f << "  \"dd_solutions_per_sec\": " << solutionsPerSec << ",\n";
-    f << "  \"runtime_tag\": \"" << runtimeTag << "\"";
-    if (failures.size() > 0)
-    {
-      f << ",\n  \"policy_fail_reasons\": [\n";
-      for (unsigned i = 0; i < failures.size(); i++)
-      {
-        f << "    \"" << failures[i] << "\"";
-        if (i + 1 != failures.size())
-          f << ",";
-        f << "\n";
-      }
-      f << "  ]\n";
-    }
-    else
-      f << "\n";
+    f << "  \"dd_solutions_per_sec\": " << solutionsPerSec << "\n";
     f << "}\n";
   }
 }
@@ -490,16 +283,6 @@ vector<RandomDeal> GenerateRandomDeals(
     strncpy(rd.deal.remainCards, pbn.c_str(), sizeof(rd.deal.remainCards)-1);
     rd.deal.remainCards[sizeof(rd.deal.remainCards)-1] = '\0';
 
-    for (int seat = 0; seat < DDS_HANDS; seat++)
-    {
-      for (int i = 0; i < cardsPerHand; i++)
-      {
-        const Card c = handCards[seat][static_cast<size_t>(i)];
-        rd.suitLen[seat][c.suit]++;
-        rd.hcp[seat] += HcpFromRank(c.rank);
-      }
-    }
-
     out[static_cast<unsigned>(d)] = rd;
   }
 
@@ -526,442 +309,37 @@ bool RunBackendEvaluation(
     options.randomDeals, options.randomSeed, options.reducedCards);
   const int nDeals = static_cast<int>(deals.size());
   const int cells = nDeals * 20;
-  cout << "Generating baseline + backend runs for " << nDeals << " random deals\n";
+  cout << "Solving " << nDeals << " random deals (CPU exact)\n";
 
   vector<dealPBN> dealPbns(static_cast<unsigned>(nDeals));
   for (int i = 0; i < nDeals; i++)
     dealPbns[static_cast<unsigned>(i)] = deals[static_cast<unsigned>(i)].deal;
 
-  vector<ddTableResults> cpuExact;
-  if (!SolveCpuExactBatched(dealPbns, nDeals, cpuExact, "cpu-exact-baseline"))
+  vector<ddTableResults> results;
+  const chrono::high_resolution_clock::time_point t0 =
+    chrono::high_resolution_clock::now();
+
+  if (!SolveCpuExactBatched(dealPbns, nDeals, results, "cpu-exact"))
     return false;
 
-  vector<TargetResult> targets;
+  const chrono::high_resolution_clock::time_point t1 =
+    chrono::high_resolution_clock::now();
+  const double elapsedMs =
+    chrono::duration_cast<chrono::duration<double, milli> >(t1 - t0).count();
+  const double secs = elapsedMs / 1000.0;
+  const double tablesPerSec = (secs > 0.0 ? static_cast<double>(nDeals) / secs : 0.0);
+  const double solutionsPerSec = (secs > 0.0 ? static_cast<double>(cells) / secs : 0.0);
 
-  auto runFast = [&]() -> TargetResult
-  {
-    TargetResult tr;
-    tr.name = "fast";
-    tr.cpuFallbackDeals = 0;
-    tr.tables.resize(static_cast<unsigned>(nDeals));
-    tr.confidence.resize(static_cast<unsigned>(nDeals));
-    const chrono::high_resolution_clock::time_point t0 = chrono::high_resolution_clock::now();
-    tr.cpuFallbackDeals = nDeals;
-    for (int i = 0; i < nDeals; i++)
-    {
-      SolveFastHeuristic(deals[static_cast<unsigned>(i)], tr.tables[static_cast<unsigned>(i)],
-        tr.confidence[static_cast<unsigned>(i)]);
-      if (ShouldPrintProgress(i + 1, nDeals))
-        PrintProgress("fast", i + 1, nDeals, t0);
-    }
-    const chrono::high_resolution_clock::time_point t1 = chrono::high_resolution_clock::now();
-    tr.elapsedMs = chrono::duration_cast<chrono::duration<double, milli> >(t1-t0).count();
-    tr.runtimeTag = RuntimeTagFast(nDeals);
-    cout << "runtime-tag[" << tr.name << "]: " << tr.runtimeTag << "\n";
-    return tr;
-  };
+  cout << "CPU exact: " << nDeals << " deals, " << cells << " cells, "
+       << fixed << setprecision(1) << elapsedMs << " ms, "
+       << tablesPerSec << " tables/s, "
+       << solutionsPerSec << " solutions/s\n";
 
-  auto runHybrid = [&]() -> TargetResult
-  {
-    TargetResult tr;
-    tr.name = "hybrid";
-    tr.cpuFallbackDeals = 0;
-    tr.tables.resize(static_cast<unsigned>(nDeals));
-    tr.confidence.resize(static_cast<unsigned>(nDeals));
-    int fallbackDeals = 0;
-    int fallbackCells = 0;
-    const chrono::high_resolution_clock::time_point t0 = chrono::high_resolution_clock::now();
-    for (int i = 0; i < nDeals; i++)
-    {
-      bool usedFallback = false;
-      SolveHybrid(deals[static_cast<unsigned>(i)], options.confidenceThreshold,
-        tr.tables[static_cast<unsigned>(i)], tr.confidence[static_cast<unsigned>(i)],
-        fallbackCells, usedFallback);
-      if (usedFallback)
-      {
-        fallbackDeals++;
-        tr.cpuFallbackDeals++;
-      }
-      if (ShouldPrintProgress(i + 1, nDeals))
-        PrintProgress("hybrid", i + 1, nDeals, t0);
-    }
-    const chrono::high_resolution_clock::time_point t1 = chrono::high_resolution_clock::now();
-    tr.elapsedMs = chrono::duration_cast<chrono::duration<double, milli> >(t1-t0).count();
-    tr.runtimeTag = RuntimeTagHybrid(fallbackDeals, nDeals);
-    cout << "Hybrid fallback used on " << fallbackDeals << "/" << nDeals <<
-      " deals (" << fallbackCells << " cells)\n";
-    cout << "runtime-tag[" << tr.name << "]: " << tr.runtimeTag << "\n";
-    return tr;
-  };
+  const string summaryPath = options.reportDir + "/dds_solve_summary.json";
+  WriteSummaryJson(summaryPath, nDeals, cells, 0, 1.0, 0.0,
+    elapsedMs, tablesPerSec, solutionsPerSec);
 
-  auto runExact = [&]() -> TargetResult
-  {
-    TargetResult tr;
-    tr.name = "exact";
-    tr.cpuFallbackDeals = 0;
-    tr.tables.resize(static_cast<unsigned>(nDeals));
-    tr.confidence.resize(static_cast<unsigned>(nDeals));
-    const chrono::high_resolution_clock::time_point t0 = chrono::high_resolution_clock::now();
-#ifdef DDS_BATCH_FALLBACKS
-    {
-      vector<dealPBN> fbDeals(static_cast<size_t>(nDeals));
-      for (int i = 0; i < nDeals; i++)
-        fbDeals[static_cast<size_t>(i)] = deals[static_cast<unsigned>(i)].deal;
-      vector<ddTableResults> fbResults;
-      if (SolveCpuExactBatched(fbDeals, nDeals, fbResults, "exact"))
-      {
-        for (int i = 0; i < nDeals; i++)
-        {
-          tr.tables[static_cast<unsigned>(i)] = fbResults[static_cast<unsigned>(i)];
-          tr.cpuFallbackDeals++;
-          for (int j = 0; j < 20; j++)
-            tr.confidence[static_cast<unsigned>(i)][j] = 1.0;
-        }
-      }
-      PrintProgress("exact", nDeals, nDeals, t0);
-    }
-#else
-    for (int i = 0; i < nDeals; i++)
-    {
-      const int ret = SolveCpuExact(deals[static_cast<unsigned>(i)].deal,
-        tr.tables[static_cast<unsigned>(i)]);
-      if (ret != RETURN_NO_FAULT)
-      {
-        cout << "Exact solve failed for deal " << i << " ret " << ret << "\n";
-        break;
-      }
-      tr.cpuFallbackDeals++;
-      for (int j = 0; j < 20; j++)
-        tr.confidence[static_cast<unsigned>(i)][j] = 1.0;
-      if (ShouldPrintProgress(i + 1, nDeals))
-        PrintProgress("exact", i + 1, nDeals, t0);
-    }
-#endif
-    const chrono::high_resolution_clock::time_point t1 = chrono::high_resolution_clock::now();
-    tr.elapsedMs = chrono::duration_cast<chrono::duration<double, milli> >(t1-t0).count();
-    tr.runtimeTag = RuntimeTagExact(tr.cpuFallbackDeals);
-    cout << "runtime-tag[" << tr.name << "]: " << tr.runtimeTag << "\n";
-    return tr;
-  };
-
-  if (options.backend == DTEST_BACKEND_COMPARE)
-  {
-    if (options.compareTarget == DTEST_COMPARE_FAST)
-      targets.push_back(runFast());
-    else if (options.compareTarget == DTEST_COMPARE_HYBRID)
-      targets.push_back(runHybrid());
-    else if (options.compareTarget == DTEST_COMPARE_EXACT)
-      targets.push_back(runExact());
-    else
-    {
-      targets.push_back(runFast());
-      targets.push_back(runHybrid());
-      targets.push_back(runExact());
-    }
-  }
-  else
-  {
-    cout << "Backend is CPU only; exact tables generated.\n";
-    return true;
-  }
-
-  const double MAX_OFF1 = 0.03;
-  const double MAX_OFF2 = 0.001;
-  bool allPass = true;
-
-  for (unsigned t = 0; t < targets.size(); t++)
-  {
-    const TargetResult& tr = targets[t];
-    cout << "Comparing target '" << tr.name << "' against CPU baseline...\n";
-    int mismatchCount = 0;
-    int off1 = 0;
-    int off2 = 0;
-    long long absSum = 0;
-
-    int contractDisagree = 0;
-    int parDisagree = 0;
-
-    map<int, int> deltaHist;
-    map<int, int> absHist;
-    int confusion[14][14];
-    for (int i = 0; i < 14; i++)
-      for (int j = 0; j < 14; j++)
-        confusion[i][j] = 0;
-
-    double calibrationCount[10];
-    double calibrationAcc[10];
-    double calibrationConf[10];
-    for (int i = 0; i < 10; i++)
-    {
-      calibrationCount[i] = 0.0;
-      calibrationAcc[i] = 0.0;
-      calibrationConf[i] = 0.0;
-    }
-
-    vector<double> deltaAll;
-    deltaAll.reserve(static_cast<unsigned>(cells));
-
-    const string mismatchPath = options.reportDir + "/dds_compare_mismatches_" + tr.name + ".csv";
-    ofstream mismatchFile(mismatchPath.c_str());
-    mismatchFile << "deal_idx,combo_idx,cpu_value,candidate_value,delta\n";
-
-    const string slicesPath = options.reportDir + "/dds_compare_slices_" + tr.name + ".csv";
-    ofstream slicesFile(slicesPath.c_str());
-    slicesFile << "combo_idx,strain,declarer,exact_rate,mae,off_by_one_rate,off_by_two_plus_rate\n";
-
-    int comboExact[20];
-    int comboAbs[20];
-    int comboOff1[20];
-    int comboOff2[20];
-    int comboCnt[20];
-    for (int i = 0; i < 20; i++)
-    {
-      comboExact[i] = 0;
-      comboAbs[i] = 0;
-      comboOff1[i] = 0;
-      comboOff2[i] = 0;
-      comboCnt[i] = 0;
-    }
-
-    const chrono::high_resolution_clock::time_point cmpT0 =
-      chrono::high_resolution_clock::now();
-    for (int i = 0; i < nDeals; i++)
-    {
-      const ddTableResults& cput = cpuExact[static_cast<unsigned>(i)];
-      const ddTableResults& cand = tr.tables[static_cast<unsigned>(i)];
-      if (ContractValue(cput) != ContractValue(cand))
-        contractDisagree++;
-      if (ParProxy(cput) != ParProxy(cand))
-        parDisagree++;
-
-      for (int strain = 0; strain < DDS_STRAINS; strain++)
-      {
-        for (int declarer = 0; declarer < DDS_HANDS; declarer++)
-        {
-          const int idx = 4 * strain + declarer;
-          const int cpuv = cput.resTable[strain][declarer];
-          const int candv = cand.resTable[strain][declarer];
-          const int d = candv - cpuv;
-          const int ad = abs(d);
-
-          deltaAll.push_back(static_cast<double>(d));
-          deltaHist[d]++;
-          absHist[ad]++;
-          const int cpuClip = clamp_int(cpuv, 0, 13);
-          const int candClip = clamp_int(candv, 0, 13);
-          confusion[cpuClip][candClip]++;
-
-          comboCnt[idx]++;
-          comboAbs[idx] += ad;
-          if (d == 0)
-            comboExact[idx]++;
-          else
-          {
-            mismatchCount++;
-            mismatchFile << i << "," << idx << "," << cpuv << "," << candv <<
-              "," << d << "\n";
-          }
-          if (ad == 1)
-          {
-            off1++;
-            comboOff1[idx]++;
-          }
-          else if (ad >= 2)
-          {
-            off2++;
-            comboOff2[idx]++;
-          }
-          absSum += ad;
-
-          const double conf = tr.confidence[static_cast<unsigned>(i)][idx];
-          int bin = static_cast<int>(floor(conf * 10.0));
-          if (bin < 0)
-            bin = 0;
-          if (bin > 9)
-            bin = 9;
-          calibrationCount[bin] += 1.0;
-          calibrationAcc[bin] += (d == 0 ? 1.0 : 0.0);
-          calibrationConf[bin] += conf;
-        }
-      }
-      if (ShouldPrintProgress(i + 1, nDeals))
-        PrintProgress("compare-" + tr.name, i + 1, nDeals, cmpT0);
-    }
-
-    mismatchFile.close();
-
-    for (int idx = 0; idx < 20; idx++)
-    {
-      const double cnt = static_cast<double>(comboCnt[idx]);
-      const double exactRate = static_cast<double>(comboExact[idx]) / cnt;
-      const double mae = static_cast<double>(comboAbs[idx]) / cnt;
-      const double ob1 = static_cast<double>(comboOff1[idx]) / cnt;
-      const double ob2 = static_cast<double>(comboOff2[idx]) / cnt;
-      slicesFile << idx << "," << idx/4 << "," << idx%4 << ","
-        << exactRate << "," << mae << "," << ob1 << "," << ob2 << "\n";
-    }
-    slicesFile.close();
-
-    sort(deltaAll.begin(), deltaAll.end());
-    const int len = static_cast<int>(deltaAll.size());
-    const double exactRate = static_cast<double>(cells - mismatchCount) /
-      static_cast<double>(cells);
-    const double mae = static_cast<double>(absSum) / static_cast<double>(cells);
-    const double off1Rate = static_cast<double>(off1) / static_cast<double>(cells);
-    const double off2Rate = static_cast<double>(off2) / static_cast<double>(cells);
-    const double contractRate = static_cast<double>(contractDisagree) /
-      static_cast<double>(nDeals);
-    const double parRate = static_cast<double>(parDisagree) /
-      static_cast<double>(nDeals);
-    const double secs = tr.elapsedMs / 1000.0;
-    const double tablesPerSec = (secs > 0.0 ? static_cast<double>(nDeals) / secs : 0.0);
-    const double solutionsPerSec = (secs > 0.0 ? static_cast<double>(cells) / secs : 0.0);
-
-    vector<string> failures;
-    if (tr.name == "exact")
-    {
-      if (mismatchCount > 0)
-      {
-        allPass = false;
-        failures.push_back("Exact mode mismatch count > 0");
-      }
-    }
-    else
-    {
-      if (off1Rate > MAX_OFF1)
-      {
-        allPass = false;
-        failures.push_back("off_by_one_rate exceeds threshold");
-      }
-      if (off2Rate > MAX_OFF2)
-      {
-        allPass = false;
-        failures.push_back("off_by_two_plus_rate exceeds threshold");
-      }
-    }
-
-    {
-      const string summaryPath = options.reportDir + "/dds_compare_summary_" + tr.name + ".json";
-      WriteSummaryJson(summaryPath, tr.name, nDeals, cells, exactRate, mae, off1Rate,
-        off2Rate, contractRate, parRate, tr.elapsedMs, tablesPerSec, solutionsPerSec,
-        tr.runtimeTag, failures);
-    }
-
-    {
-      const string histPath = options.reportDir + "/dds_compare_histograms_" + tr.name + ".json";
-      ofstream f(histPath.c_str());
-      f << "{\n  \"delta_histogram\": {\n";
-      unsigned h = 0;
-      for (map<int, int>::const_iterator it = deltaHist.begin();
-          it != deltaHist.end(); ++it, ++h)
-      {
-        f << "    \"" << it->first << "\": " << it->second;
-        if (h + 1U != deltaHist.size())
-          f << ",";
-        f << "\n";
-      }
-      f << "  },\n  \"abs_delta_histogram\": {\n";
-      h = 0;
-      for (map<int, int>::const_iterator it = absHist.begin();
-          it != absHist.end(); ++it, ++h)
-      {
-        f << "    \"" << it->first << "\": " << it->second;
-        if (h + 1U != absHist.size())
-          f << ",";
-        f << "\n";
-      }
-      f << "  }\n}\n";
-    }
-
-    if (tr.name != "exact")
-    {
-      const string statsPath = options.reportDir + "/dds_compare_stats_" + tr.name + ".json";
-      ofstream f(statsPath.c_str());
-      double sum = 0.0;
-      double sq = 0.0;
-      for (int i = 0; i < len; i++)
-      {
-        sum += deltaAll[static_cast<unsigned>(i)];
-        sq += deltaAll[static_cast<unsigned>(i)] * deltaAll[static_cast<unsigned>(i)];
-      }
-      const double mean = sum / static_cast<double>(len);
-      const double variance = max(0.0, sq / static_cast<double>(len) - mean * mean);
-      const double stddev = sqrt(variance);
-
-      auto pct = [&](const double p) -> double
-      {
-        int idx = static_cast<int>(floor(p * static_cast<double>(len - 1)));
-        idx = clamp_int(idx, 0, len-1);
-        return deltaAll[static_cast<unsigned>(idx)];
-      };
-      f << "{\n";
-      f << "  \"mean_error\": " << mean << ",\n";
-      f << "  \"median_error\": " << pct(0.50) << ",\n";
-      f << "  \"std_error\": " << stddev << ",\n";
-      f << "  \"min_error\": " << deltaAll.front() << ",\n";
-      f << "  \"max_error\": " << deltaAll.back() << ",\n";
-      f << "  \"percentiles\": {\n";
-      f << "    \"p5\": " << pct(0.05) << ",\n";
-      f << "    \"p25\": " << pct(0.25) << ",\n";
-      f << "    \"p50\": " << pct(0.50) << ",\n";
-      f << "    \"p75\": " << pct(0.75) << ",\n";
-      f << "    \"p95\": " << pct(0.95) << ",\n";
-      f << "    \"p99\": " << pct(0.99) << "\n";
-      f << "  },\n";
-      f << "  \"mae\": " << mae << ",\n";
-      f << "  \"rmse\": " << sqrt(sq / static_cast<double>(len)) << ",\n";
-      f << "  \"tail_rates\": {\n";
-      f << "    \"|delta|>=1\": " << off1Rate + off2Rate << ",\n";
-      f << "    \"|delta|>=2\": " << off2Rate << "\n";
-      f << "  }\n";
-      f << "}\n";
-
-      const string cmPath = options.reportDir + "/dds_compare_confusion_matrix_" + tr.name + ".csv";
-      ofstream cm(cmPath.c_str());
-      for (int i = 0; i < 14; i++)
-      {
-        for (int j = 0; j < 14; j++)
-        {
-          cm << confusion[i][j];
-          if (j != 13)
-            cm << ",";
-        }
-        cm << "\n";
-      }
-
-      const string calPath = options.reportDir + "/dds_compare_calibration_" + tr.name + ".json";
-      ofstream cal(calPath.c_str());
-      double ece = 0.0;
-      cal << "{\n  \"reliability_table\": [\n";
-      bool first = true;
-      for (int b = 0; b < 10; b++)
-      {
-        if (calibrationCount[b] <= 0.0)
-          continue;
-        const double acc = calibrationAcc[b] / calibrationCount[b];
-        const double avgConf = calibrationConf[b] / calibrationCount[b];
-        ece += fabs(acc - avgConf) * (calibrationCount[b] / static_cast<double>(cells));
-        if (! first)
-          cal << ",\n";
-        first = false;
-        cal << "    {\"bin\": " << b <<
-          ", \"count\": " << static_cast<long long>(calibrationCount[b]) <<
-          ", \"accuracy\": " << acc <<
-          ", \"avg_confidence\": " << avgConf << "}";
-      }
-      cal << "\n  ],\n";
-      cal << "  \"ece\": " << ece << "\n";
-      cal << "}\n";
-    }
-
-    cout << tr.name << ": exact=" << fixed << setprecision(6) << exactRate
-      << " mae=" << mae << " off1=" << off1Rate << " off2=" << off2Rate
-      << " runtime_ms=" << tr.elapsedMs
-      << " tables_per_sec=" << tablesPerSec
-      << " solutions_per_sec=" << solutionsPerSec << "\n";
-  }
-
-  return allPass;
+  return true;
 }
 
 
@@ -1110,87 +488,6 @@ namespace
     if (c == 'S' || c == 's') return 2;
     if (c == 'W' || c == 'w') return 3;
     return -1;
-  }
-
-  int RankFromChar(
-    const char c)
-  {
-    if (c == 'A' || c == 'a') return 14;
-    if (c == 'K' || c == 'k') return 13;
-    if (c == 'Q' || c == 'q') return 12;
-    if (c == 'J' || c == 'j') return 11;
-    if (c == 'T' || c == 't') return 10;
-    if (c >= '2' && c <= '9') return static_cast<int>(c - '0');
-    return -1;
-  }
-
-  bool FillFeaturesFromDeal(
-    const dealPBN& deal,
-    RandomDeal& rd)
-  {
-    rd.deal = deal;
-    for (int h = 0; h < DDS_HANDS; h++)
-    {
-      rd.hcp[h] = 0;
-      for (int s = 0; s < DDS_SUITS; s++)
-        rd.suitLen[h][s] = 0;
-    }
-
-    const string cards = deal.remainCards;
-    const size_t colon = cards.find(':');
-    if (colon == string::npos || colon == 0)
-      return false;
-
-    const int dealer = SeatIndex(cards[0]);
-    if (dealer < 0)
-      return false;
-
-    const string rest = cards.substr(colon + 1);
-    istringstream hs(rest);
-    vector<string> hands;
-    string hand;
-    while (hs >> hand)
-      hands.push_back(hand);
-    if (hands.size() != 4U)
-      return false;
-
-    for (int rel = 0; rel < 4; rel++)
-    {
-      const int seat = (dealer + rel) % 4;
-      const string& htxt = hands[static_cast<size_t>(rel)];
-      vector<string> suits;
-      string part = "";
-      for (size_t i = 0; i < htxt.size(); i++)
-      {
-        if (htxt[i] == '.')
-        {
-          suits.push_back(part);
-          part = "";
-        }
-        else
-          part += htxt[i];
-      }
-      suits.push_back(part);
-      if (suits.size() != 4U)
-        return false;
-
-      for (int s = 0; s < 4; s++)
-      {
-        const string& ranks = suits[static_cast<size_t>(s)];
-        if (ranks == "-" || ranks == "")
-          continue;
-        for (size_t k = 0; k < ranks.size(); k++)
-        {
-          const int r = RankFromChar(ranks[k]);
-          if (r < 2)
-            continue;
-          rd.suitLen[seat][s]++;
-          rd.hcp[seat] += HcpFromRank(r);
-        }
-      }
-    }
-
-    return true;
   }
 
   bool LoadTextFromSource(
@@ -1517,8 +814,8 @@ bool RunPbnEvaluation(
     return false;
   }
 
-  vector<RandomDeal> deals;
-  deals.reserve(entries.size());
+  vector<dealPBN> pbnDeals;
+  pbnDeals.reserve(entries.size());
   vector<int> referenceIdx;
   vector<ddTableResults> referenceTables;
   referenceTables.reserve(entries.size());
@@ -1528,10 +825,7 @@ bool RunPbnEvaluation(
   dealTexts.reserve(entries.size());
   for (size_t i = 0; i < entries.size(); i++)
   {
-    RandomDeal rd;
-    if (! FillFeaturesFromDeal(entries[i].deal, rd))
-      continue;
-    deals.push_back(rd);
+    pbnDeals.push_back(entries[i].deal);
     boardLabels.push_back(entries[i].boardLabel);
     dealTexts.push_back(entries[i].dealText);
     ddTableResults dummy;
@@ -1539,12 +833,12 @@ bool RunPbnEvaluation(
     referenceTables.push_back(dummy);
     if (entries[i].hasReferenceTable)
     {
-      referenceIdx.push_back(static_cast<int>(deals.size() - 1));
+      referenceIdx.push_back(static_cast<int>(pbnDeals.size() - 1));
       referenceTables.back() = entries[i].referenceTable;
     }
   }
 
-  const int nDeals = static_cast<int>(deals.size());
+  const int nDeals = static_cast<int>(pbnDeals.size());
   if (nDeals == 0)
   {
     cout << "Parsed deals had invalid structure\n";
@@ -1554,267 +848,74 @@ bool RunPbnEvaluation(
   cout << "Loaded " << nDeals << " deals from PBN source";
   cout << " (" << referenceIdx.size() << " with embedded DD tables)\n";
 
-  vector<dealPBN> pbnDeals(static_cast<unsigned>(nDeals));
-  for (int i = 0; i < nDeals; i++)
-    pbnDeals[static_cast<unsigned>(i)] = deals[static_cast<unsigned>(i)].deal;
-
   vector<ddTableResults> exact;
   if (!SolveCpuExactBatched(pbnDeals, nDeals, exact, "pbn-exact"))
     return false;
 
-  auto runTarget = [&](const string& name,
-      vector<ddTableResults>& outTables,
-      vector<array<double, 20> >& outConf,
-      double& elapsedMs,
-      int& cpuFallbackDeals,
-      string& runtimeTag) -> bool
+  const int numCells = nDeals * 20;
+
+  int pExactMatches = 0;
+  int pOff1 = 0;
+  int pOff2 = 0;
+  long long pAbsSum = 0;
+  const int pCells = static_cast<int>(referenceIdx.size()) * 20;
+
+  const string mmPath = options.reportDir + "/pbn_mismatches.csv";
+  ofstream mm(mmPath.c_str());
+  mm << "deal_idx,source,combo_idx,expected,predicted,delta\n";
+
+  for (size_t r = 0; r < referenceIdx.size(); r++)
   {
-    cpuFallbackDeals = 0;
-    outTables.resize(static_cast<unsigned>(nDeals));
-    outConf.resize(static_cast<unsigned>(nDeals));
-    const chrono::high_resolution_clock::time_point t0 = chrono::high_resolution_clock::now();
-    int fallbackDeals = 0;
-    int fallbackCells = 0;
-
-    if (name == "exact")
+    const int i = referenceIdx[r];
+    const ddTableResults& exp = referenceTables[static_cast<size_t>(i)];
+    const ddTableResults& got = exact[static_cast<size_t>(i)];
+    for (int strain = 0; strain < DDS_STRAINS; strain++)
     {
-#ifdef DDS_BATCH_FALLBACKS
-      vector<dealPBN> fbDeals(static_cast<size_t>(nDeals));
-      for (int i = 0; i < nDeals; i++)
-        fbDeals[static_cast<size_t>(i)] = deals[static_cast<unsigned>(i)].deal;
-      vector<ddTableResults> fbResults;
-      if (!SolveCpuExactBatched(fbDeals, nDeals, fbResults, "pbn-exact"))
-        return false;
-      for (int i = 0; i < nDeals; i++)
+      for (int declarer = 0; declarer < DDS_HANDS; declarer++)
       {
-        outTables[static_cast<unsigned>(i)] = fbResults[static_cast<unsigned>(i)];
-        fallbackDeals++;
-        cpuFallbackDeals++;
-        for (int j = 0; j < 20; j++)
-          outConf[static_cast<unsigned>(i)][j] = 1.0;
+        const int idx = 4 * strain + declarer;
+        const int a = exp.resTable[strain][declarer];
+        const int b = got.resTable[strain][declarer];
+        const int d = b - a;
+        const int ad = abs(d);
+        if (d == 0) pExactMatches++;
+        else
+          mm << i << ",pbn_table," << idx << "," << a << "," << b << "," << d << "\n";
+        if (ad == 1) pOff1++;
+        if (ad >= 2) pOff2++;
+        pAbsSum += ad;
       }
-      PrintProgress("pbn-" + name, nDeals, nDeals, t0);
-#else
-      for (int i = 0; i < nDeals; i++)
-      {
-        const int ret = SolveCpuExact(deals[static_cast<unsigned>(i)].deal,
-          outTables[static_cast<unsigned>(i)]);
-        if (ret != RETURN_NO_FAULT)
-          return false;
-        fallbackDeals++;
-        cpuFallbackDeals++;
-        for (int j = 0; j < 20; j++)
-          outConf[static_cast<unsigned>(i)][j] = 1.0;
-        if (ShouldPrintProgress(i + 1, nDeals))
-          PrintProgress("pbn-" + name, i + 1, nDeals, t0);
-      }
-#endif
-    }
-    else
-    {
-      for (int i = 0; i < nDeals; i++)
-      {
-        if (name == "fast")
-        {
-          SolveFastHeuristic(deals[static_cast<unsigned>(i)], outTables[static_cast<unsigned>(i)],
-            outConf[static_cast<unsigned>(i)]);
-        }
-        else if (name == "hybrid")
-        {
-          bool usedFallback = false;
-          SolveHybrid(deals[static_cast<unsigned>(i)], options.confidenceThreshold,
-            outTables[static_cast<unsigned>(i)], outConf[static_cast<unsigned>(i)],
-            fallbackCells, usedFallback);
-          if (usedFallback)
-          {
-            fallbackDeals++;
-            cpuFallbackDeals++;
-          }
-        }
-
-        if (ShouldPrintProgress(i + 1, nDeals))
-          PrintProgress("pbn-" + name, i + 1, nDeals, t0);
-      }
-    }
-
-    const chrono::high_resolution_clock::time_point t1 = chrono::high_resolution_clock::now();
-    elapsedMs = chrono::duration_cast<chrono::duration<double, milli> >(t1-t0).count();
-    if (name == "hybrid")
-      cout << "PBN hybrid fallback on " << fallbackDeals << "/" << nDeals <<
-        " deals (" << fallbackCells << " cells)\n";
-    if (name == "exact")
-      cout << "PBN exact on " << fallbackDeals << "/" << nDeals << " deals\n";
-    if (name == "fast")
-      runtimeTag = RuntimeTagFast(nDeals);
-    else if (name == "hybrid")
-      runtimeTag = RuntimeTagHybrid(fallbackDeals, nDeals);
-    else
-      runtimeTag = RuntimeTagExact(cpuFallbackDeals);
-    cout << "runtime-tag[pbn-" << name << "]: " << runtimeTag << "\n";
-    return true;
-  };
-
-  vector<string> targets;
-  if (options.backend == DTEST_BACKEND_COMPARE || options.backend == DTEST_BACKEND_CPU)
-  {
-    if (options.compareTarget == DTEST_COMPARE_FAST)
-      targets.push_back("fast");
-    else if (options.compareTarget == DTEST_COMPARE_HYBRID)
-      targets.push_back("hybrid");
-    else if (options.compareTarget == DTEST_COMPARE_EXACT)
-      targets.push_back("exact");
-    else
-    {
-      targets.push_back("fast");
-      targets.push_back("hybrid");
-      targets.push_back("exact");
     }
   }
+  mm.close();
+
+  double pExactRate = -1.0;
+  double pMae = -1.0;
+  double pOff1Rate = -1.0;
+  double pOff2Rate = -1.0;
+  if (pCells > 0)
+  {
+    pExactRate = static_cast<double>(pExactMatches) / static_cast<double>(pCells);
+    pMae = static_cast<double>(pAbsSum) / static_cast<double>(pCells);
+    pOff1Rate = static_cast<double>(pOff1) / static_cast<double>(pCells);
+    pOff2Rate = static_cast<double>(pOff2) / static_cast<double>(pCells);
+  }
+
+  cout << "PBN exact: " << nDeals << " deals, " << numCells << " cells\n";
+  if (pCells > 0)
+    cout << "  vs PBN reference: exact_match=" << fixed << setprecision(6) << pExactRate
+         << " mae=" << pMae << " off1=" << pOff1Rate << " off2=" << pOff2Rate << "\n";
 
   const string csvPath = options.reportDir + "/pbn_combined_summary.csv";
   ofstream summary(csvPath.c_str());
-  summary << "target,num_deals,num_cells,exact_match_vs_cpu,mae_vs_cpu,off1_vs_cpu,off2_vs_cpu,"
-    "num_deals_with_pbn_table,exact_match_vs_pbn,mae_vs_pbn,off1_vs_pbn,off2_vs_pbn,elapsed_ms,"
-    "dd_tables_per_sec,dd_solutions_per_sec,runtime_tag\n";
-
-  struct ModeCapture
-  {
-    string name;
-    vector<ddTableResults> tables;
-    double elapsedMs;
-    double tablesPerSec;
-    double solutionsPerSec;
-    string executionPath;
-    int cpuFallbackDeals;
-    string runtimeTag;
-  };
-  vector<ModeCapture> modeCaptures;
-
-  for (size_t ti = 0; ti < targets.size(); ti++)
-  {
-    vector<ddTableResults> pred;
-    vector<array<double, 20> > conf;
-    double elapsedMs = 0.0;
-    int cpuFallbackDeals = 0;
-    string runtimeTag;
-    if (! runTarget(targets[ti], pred, conf, elapsedMs, cpuFallbackDeals, runtimeTag))
-    {
-      cout << "Target run failed: " << targets[ti] << "\n";
-      return false;
-    }
-
-    int exactMatches = 0;
-    int off1 = 0;
-    int off2 = 0;
-    long long absSum = 0;
-
-    int pExactMatches = 0;
-    int pOff1 = 0;
-    int pOff2 = 0;
-    long long pAbsSum = 0;
-
-    const int numCells = nDeals * 20;
-    const int pCells = static_cast<int>(referenceIdx.size()) * 20;
-    const string mmPath = options.reportDir + "/pbn_mismatches_" + targets[ti] + ".csv";
-    ofstream mm(mmPath.c_str());
-    mm << "deal_idx,source,combo_idx,expected,predicted,delta\n";
-
-    for (int i = 0; i < nDeals; i++)
-    {
-      for (int strain = 0; strain < DDS_STRAINS; strain++)
-      {
-        for (int declarer = 0; declarer < DDS_HANDS; declarer++)
-        {
-          const int idx = 4 * strain + declarer;
-          const int a = exact[static_cast<unsigned>(i)].resTable[strain][declarer];
-          const int b = pred[static_cast<unsigned>(i)].resTable[strain][declarer];
-          const int d = b - a;
-          const int ad = abs(d);
-          if (d == 0) exactMatches++;
-          if (ad == 1) off1++;
-          if (ad >= 2) off2++;
-          absSum += ad;
-        }
-      }
-    }
-
-    for (size_t r = 0; r < referenceIdx.size(); r++)
-    {
-      const int i = referenceIdx[r];
-      const ddTableResults& exp = referenceTables[static_cast<size_t>(i)];
-      const ddTableResults& got = pred[static_cast<size_t>(i)];
-      for (int strain = 0; strain < DDS_STRAINS; strain++)
-      {
-        for (int declarer = 0; declarer < DDS_HANDS; declarer++)
-        {
-          const int idx = 4 * strain + declarer;
-          const int a = exp.resTable[strain][declarer];
-          const int b = got.resTable[strain][declarer];
-          const int d = b - a;
-          const int ad = abs(d);
-          if (d == 0) pExactMatches++;
-          else
-            mm << i << ",pbn_table," << idx << "," << a << "," << b << "," << d << "\n";
-          if (ad == 1) pOff1++;
-          if (ad >= 2) pOff2++;
-          pAbsSum += ad;
-        }
-      }
-    }
-    mm.close();
-
-    const double exactRate = static_cast<double>(exactMatches) / static_cast<double>(numCells);
-    const double mae = static_cast<double>(absSum) / static_cast<double>(numCells);
-    const double off1Rate = static_cast<double>(off1) / static_cast<double>(numCells);
-    const double off2Rate = static_cast<double>(off2) / static_cast<double>(numCells);
-
-    double pExactRate = -1.0;
-    double pMae = -1.0;
-    double pOff1Rate = -1.0;
-    double pOff2Rate = -1.0;
-    if (pCells > 0)
-    {
-      pExactRate = static_cast<double>(pExactMatches) / static_cast<double>(pCells);
-      pMae = static_cast<double>(pAbsSum) / static_cast<double>(pCells);
-      pOff1Rate = static_cast<double>(pOff1) / static_cast<double>(pCells);
-      pOff2Rate = static_cast<double>(pOff2) / static_cast<double>(pCells);
-    }
-
-    const double secs = elapsedMs / 1000.0;
-    const double tablesPerSec = (secs > 0.0 ? static_cast<double>(nDeals) / secs : 0.0);
-    const double solutionsPerSec = (secs > 0.0 ? static_cast<double>(numCells) / secs : 0.0);
-
-    cout << "PBN " << targets[ti]
-      << ": cpu_exact_match=" << fixed << setprecision(6) << exactRate
-      << " cpu_mae=" << mae;
-    if (pCells > 0)
-      cout << " pbn_exact_match=" << pExactRate << " pbn_mae=" << pMae;
-    cout << " runtime_ms=" << elapsedMs
-      << " tables_per_sec=" << tablesPerSec
-      << " solutions_per_sec=" << solutionsPerSec << "\n";
-
-    summary << targets[ti] << ","
-      << nDeals << "," << numCells << ","
-      << exactRate << "," << mae << "," << off1Rate << "," << off2Rate << ","
-      << referenceIdx.size() << ",";
-    if (pCells > 0)
-      summary << pExactRate << "," << pMae << "," << pOff1Rate << "," << pOff2Rate;
-    else
-      summary << ",,,,";
-    summary << "," << elapsedMs << "," << tablesPerSec << "," << solutionsPerSec
-      << ",\"" << runtimeTag << "\"\n";
-
-    ModeCapture mc;
-    mc.name = targets[ti];
-    mc.tables = pred;
-    mc.elapsedMs = elapsedMs;
-    mc.tablesPerSec = tablesPerSec;
-    mc.solutionsPerSec = solutionsPerSec;
-    mc.executionPath = "CPU";
-    mc.cpuFallbackDeals = cpuFallbackDeals;
-    mc.runtimeTag = runtimeTag;
-    modeCaptures.push_back(mc);
-  }
+  summary << "num_deals,num_cells,num_deals_with_pbn_table,exact_match_vs_pbn,mae_vs_pbn,off1_vs_pbn,off2_vs_pbn\n";
+  summary << nDeals << "," << numCells << ","
+    << referenceIdx.size() << ",";
+  if (pCells > 0)
+    summary << pExactRate << "," << pMae << "," << pOff1Rate << "," << pOff2Rate;
+  else
+    summary << ",,,,";
+  summary << "\n";
   summary.close();
 
   if (options.htmlReport != "")
@@ -1833,41 +934,12 @@ bool RunPbnEvaluation(
            << "</style></head><body>";
       html << "<h2>DDS PBN Evaluation Report</h2>";
       html << "<p><b>Source:</b> " << HtmlEscape(options.pbnSource) << "<br>";
-      html << "<b>Deals:</b> " << nDeals << " &nbsp; <b>Cells:</b> " << (nDeals * 20) << "</p>";
+      html << "<b>Deals:</b> " << nDeals << " &nbsp; <b>Cells:</b> " << numCells << "</p>";
 
-      html << "<h3>Mode Summary</h3><table><thead><tr>"
-           << "<th>Mode</th><th>Execution Path</th><th>CPU Fallback Deals</th>"
-           << "<th>Elapsed ms</th><th>DD tables/sec</th><th>DD solutions/sec</th><th>Runtime Tag</th>"
-           << "</tr></thead><tbody>";
-      for (size_t mi = 0; mi < modeCaptures.size(); mi++)
-      {
-        const ModeCapture& mc = modeCaptures[mi];
-        html << "<tr><td>" << HtmlEscape(mc.name) << "</td>"
-             << "<td>" << mc.executionPath << "</td>"
-             << "<td>" << mc.cpuFallbackDeals << "</td>"
-             << "<td>" << mc.elapsedMs << "</td>"
-             << "<td>" << mc.tablesPerSec << "</td>"
-             << "<td>" << mc.solutionsPerSec << "</td>"
-             << "<td class=\"small\">" << HtmlEscape(mc.runtimeTag) << "</td></tr>";
-      }
-      html << "</tbody></table>";
-
-      auto findMode = [&](const string& name) -> const ModeCapture *
-      {
-        for (size_t i = 0; i < modeCaptures.size(); i++)
-          if (modeCaptures[i].name == name)
-            return &modeCaptures[i];
-        return nullptr;
-      };
-      const ModeCapture * fastCap = findMode("fast");
-      const ModeCapture * hybridCap = findMode("hybrid");
-      const ModeCapture * exactCap = findMode("exact");
-
-      html << "<h3>Per-board DataFrame</h3>";
+      html << "<h3>Per-board Results</h3>";
       html << "<table><thead><tr>"
            << "<th>row</th><th>board</th><th>deal</th>"
            << "<th>cpu_exact_dd20</th>"
-           << "<th>fast_dd20</th><th>hybrid_dd20</th><th>exact_dd20</th>"
            << "<th>pbn_ref_dd20</th>"
            << "</tr></thead><tbody>";
       for (int i = 0; i < nDeals; i++)
@@ -1885,18 +957,6 @@ bool RunPbnEvaluation(
              << "<td>" << HtmlEscape(b) << "</td>"
              << "<td class=\"small\">" << HtmlEscape(dealTexts[static_cast<size_t>(i)]) << "</td>"
              << "<td class=\"mono\">" << HtmlEscape(TableCompact(exact[static_cast<size_t>(i)])) << "</td>";
-        if (fastCap != nullptr)
-          html << "<td class=\"mono\">" << HtmlEscape(TableCompact(fastCap->tables[static_cast<size_t>(i)])) << "</td>";
-        else
-          html << "<td>-</td>";
-        if (hybridCap != nullptr)
-          html << "<td class=\"mono\">" << HtmlEscape(TableCompact(hybridCap->tables[static_cast<size_t>(i)])) << "</td>";
-        else
-          html << "<td>-</td>";
-        if (exactCap != nullptr)
-          html << "<td class=\"mono\">" << HtmlEscape(TableCompact(exactCap->tables[static_cast<size_t>(i)])) << "</td>";
-        else
-          html << "<td>-</td>";
         if (referenceTables[static_cast<size_t>(i)].resTable[0][0] != 0 ||
             referenceTables[static_cast<size_t>(i)].resTable[0][1] != 0 ||
             referenceTables[static_cast<size_t>(i)].resTable[0][2] != 0 ||

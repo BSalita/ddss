@@ -6,7 +6,6 @@ set(DDS_THREADING "STL" CACHE STRING "DDS threading backend: NONE, STL, OPENMP, 
 set_property(CACHE DDS_THREADING PROPERTY STRINGS NONE STL OPENMP WINAPI)
 
 option(DDS_AGGRESSIVE_OPT "Enable /Ox /GL /LTCG for MSVC (aggressive optimisation)" OFF)
-option(DDS_BATCH_FALLBACKS "Batch fallback CPU solves in compare paths" OFF)
 
 
 set(CMAKE_CXX_STANDARD 17)
@@ -124,11 +123,6 @@ if(DDS_AGGRESSIVE_OPT)
     target_link_options(dtest PRIVATE -flto)
     message(STATUS "DDS aggressive optimisation: ON (-O3 -flto -march=native)")
   endif()
-endif()
-
-if(DDS_BATCH_FALLBACKS)
-  target_compile_definitions(dtest PRIVATE DDS_BATCH_FALLBACKS)
-  message(STATUS "DDS batch fallbacks: ON")
 endif()
 
 # NOTE: The new CalcAllTablesPBNx API handles any number of deals

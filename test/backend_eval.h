@@ -2,7 +2,7 @@
    DDS, a bridge double dummy solver.
 
    Backend evaluation helpers:
-   random deal generation, fast/hybrid/exact backends, and reports.
+   random deal generation, CPU exact solving, and reports.
 */
 
 #ifndef DTEST_BACKEND_EVAL_H
@@ -17,8 +17,6 @@
 struct RandomDeal
 {
   dealPBN deal;
-  int suitLen[DDS_HANDS][DDS_SUITS];
-  int hcp[DDS_HANDS];
 };
 
 bool RunBackendEvaluation(
