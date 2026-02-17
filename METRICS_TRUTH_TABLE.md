@@ -67,6 +67,64 @@ Throughput increases with deal count because larger runs amortize per-batch over
 
 ---
 
+## Torture Test Results
+
+The DDS repository includes several hand files designed to stress-test the double-dummy solver. These are the hardest known inputs for the alpha-beta search engine.
+
+### Test files
+
+| File | Hands | Description |
+|------|------:|-------------|
+| `hands/thomas1.txt` | 1 | Synthetic worst-case: symmetric interlocking 4-suit distribution (`Q853.AJ962.KT74.` rotated across all four seats). |
+| `hands/thomas2.txt` | 1 | Synthetic worst-case: extreme interlocking 7-6 distribution (`AQT8642.KJ9753..` rotated). The single hardest known hand for DDS. |
+| `hands/largest.txt` | 21 | The 21 slowest-solving hands from the 83,691-hand `masterDD.txt` collection (Pavlicek archives + Soren Hein's play records). |
+
+### Correctness verification
+
+All torture tests produce correct results verified against the reference solutions embedded in the input files (`FUT` / `TABLE` fields).
+
+| File | Mode | Result |
+|------|------|--------|
+| `thomas1.txt` | solve | PASS |
+| `thomas2.txt` | solve | PASS |
+| `largest.txt` | solve | PASS (21/21) |
+
+### Single-threaded vs multi-threaded performance
+
+Machine: 32-core, 64-bit Windows, MSVC 19.43. DDS 2.9.0 fork with STL threading.
+
+**`solve` mode** (serial, one hand at a time via `SolveBoardPBN`):
+
+| File | Hands | ST time (ms) | ST avg/hand | MT time (ms) | MT avg/hand | MT speedup |
+|------|------:|-------------:|------------:|-------------:|------------:|-----------:|
+| `thomas1.txt` | 1 | 652 | 652 ms | 668 | 668 ms | 1.0x |
+| `thomas2.txt` | 1 | 67,831 | 67.8 s | 69,238 | 69.2 s | 1.0x |
+| `largest.txt` | 21 | 10,037 | 478 ms | 2,283 | 109 ms | 4.4x |
+
+**`calc` mode** (batched via `CalcAllTablesPBN`, computes full 5x4 DD table):
+
+| File | Hands | ST time (ms) | ST avg/hand | MT time (ms) | MT avg/hand | MT speedup |
+|------|------:|-------------:|------------:|-------------:|------------:|-----------:|
+| `largest.txt` | 21 | 8,012 | 382 ms | 2,094 | 100 ms | 3.8x |
+
+**Batch throughput** (`CalcAllTablesPBNx`, 1000 random 13-card deals):
+
+| Threading | Time (ms) | Tables/s | Solutions/s |
+|-----------|----------:|---------:|------------:|
+| ST (1 thread) | 19,875 | 50 | 1,006 |
+| MT (32 threads) | 1,782 | 561 | 11,226 |
+| **MT speedup** | | **11.2x** | |
+
+### Observations
+
+- **Single-hand solve mode shows no MT benefit** for `thomas1` and `thomas2`. This is expected: `SolveBoardPBN` solves one hand at a time, so threading only helps within a single deal's 20 strain/declarer sub-problems. The synthetic torture hands have unusually deep search trees per sub-problem, limiting parallel decomposition.
+- **Multi-hand solve mode (`largest.txt`) shows 4.4x MT speedup** because DDS can overlap the 21 hands across 32 threads.
+- **Batch calc mode shows 3.8x MT speedup** on the 21 hard hands. Lower than the 11.2x seen with 1000 random deals because the hard hands have highly variable solve times, causing thread imbalance (one long hand dominates wall-clock time).
+- **`thomas2` is the extreme outlier**: ~68 seconds for a single hand regardless of threading. This is a known property of the interlocking 7-6 distribution which creates a combinatorially explosive alpha-beta tree. No known DD solver handles this hand quickly.
+- **Random-deal throughput** (1000 deals) shows the expected **11.2x MT speedup** from 32-thread batched solving, consistent with the ~98x vs OOB-ST measured in the main benchmark table.
+
+---
+
 ## Performance vs Original GitHub Clone
 
 ### What "OOB" means
