@@ -366,7 +366,8 @@ void Scheduler::FinetuneGroups()
       b2 = hands[lp->first].next;
 
       bool match = false;
-      if (hands[b1].spareKey == hands[b2].spareKey)
+      if (hands[b1].spareKey == hands[b2].spareKey &&
+          hands[b1].strain == hands[b2].strain)
       {
         // It is now extremely likely that it is a repeat hand,
         // but we have to be sure.
@@ -499,6 +500,9 @@ bool Scheduler::SameHand(
   const int hno1,
   const int hno2) const
 {
+  if (hands[hno1].strain != hands[hno2].strain)
+    return false;
+
   for (int h = 0; h < DDS_HANDS; h++)
     for (int s = 0; s < DDS_SUITS; s++)
       if (hands[hno1].remainCards[h][s] != hands[hno2].remainCards[h][s])

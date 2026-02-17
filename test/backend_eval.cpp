@@ -6,6 +6,7 @@
 */
 
 #include "backend_eval.h"
+#include "oob_dds.h"
 
 #include <algorithm>
 #include <array>
@@ -47,18 +48,6 @@ namespace
   static const char RANK_CHARS[13] = {'A', 'K', 'Q', 'J', 'T', '9', '8', '7',
     '6', '5', '4', '3', '2'};
   static const int RANK_VALUES[13] = {14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2};
-
-  inline int clamp_int(
-    const int x,
-    const int lo,
-    const int hi)
-  {
-    if (x < lo)
-      return lo;
-    if (x > hi)
-      return hi;
-    return x;
-  }
 
   void PrintProgress(
     const string& stage,
@@ -161,7 +150,8 @@ namespace
     const vector<dealPBN>& deals,
     int nDeals,
     vector<ddTableResults>& outTables,
-    const string& progressLabel)
+    const string& progressLabel,
+    double * elapsedMsOut = nullptr)
   {
     outTables.resize(static_cast<unsigned>(nDeals));
 
@@ -197,6 +187,9 @@ namespace
          << " deals in " << ms << " ms ("
          << (nDeals * 1000.0 / ms) << " tables/s)\n";
 
+    if (elapsedMsOut)
+      *elapsedMsOut = ms;
+
     return true;
   }
 
@@ -223,19 +216,143 @@ namespace
     f << "  \"dd_solutions_per_sec\": " << solutionsPerSec << "\n";
     f << "}\n";
   }
+
+  // Solve deals one-at-a-time via OOB DLL and compare against ddss results.
+  // ddssMs is the elapsed time for the ddss solve pass (for comparison).
+  // If oobResultsOut is non-null, the OOB results are stored there.
+  // Returns the number of mismatched cells.
+  int CompareWithOob(
+    OobDds& oob,
+    const vector<dealPBN>& deals,
+    const vector<ddTableResults>& ddssResults,
+    const int nDeals,
+    const double ddssMs,
+    const string& reportDir,
+    const string& csvName,
+    vector<ddTableResults> * oobResultsOut = nullptr)
+  {
+    if (! oob.IsLoaded())
+      return 0;
+
+    cout << "\n=== OOB Cross-Verification ===\n";
+    cout << "OOB DLL:   " << oob.Path() << "\n";
+    cout << "Deals:     " << nDeals << " (" << (nDeals * 20) << " cells)\n";
+
+    const string mmPath = reportDir + "/" + csvName;
+    ofstream mm(mmPath.c_str());
+    mm << "deal_idx,combo_idx,strain,declarer,ddss,oob,delta\n";
+
+    if (oobResultsOut)
+      oobResultsOut->resize(static_cast<size_t>(nDeals));
+
+    const chrono::high_resolution_clock::time_point t0 =
+      chrono::high_resolution_clock::now();
+
+    int totalMismatches = 0;
+    int totalMatches = 0;
+    int oobErrors = 0;
+
+    for (int i = 0; i < nDeals; i++)
+    {
+      ddTableDealPBN td;
+      memset(&td, 0, sizeof(td));
+      strncpy(td.cards, deals[static_cast<size_t>(i)].remainCards,
+        sizeof(td.cards) - 1);
+
+      ddTableResults oobTable;
+      memset(&oobTable, 0, sizeof(oobTable));
+      const int ret = oob.CalcDDtablePBN(td, &oobTable);
+      if (ret != RETURN_NO_FAULT)
+      {
+        oobErrors++;
+        if (oobResultsOut)
+          memset(&(*oobResultsOut)[static_cast<size_t>(i)], 0, sizeof(ddTableResults));
+        continue;
+      }
+
+      if (oobResultsOut)
+        (*oobResultsOut)[static_cast<size_t>(i)] = oobTable;
+
+      const ddTableResults& got = ddssResults[static_cast<size_t>(i)];
+
+      for (int strain = 0; strain < DDS_STRAINS; strain++)
+      {
+        for (int declarer = 0; declarer < DDS_HANDS; declarer++)
+        {
+          const int a = got.resTable[strain][declarer];
+          const int b = oobTable.resTable[strain][declarer];
+          if (a != b)
+          {
+            const int idx = 4 * strain + declarer;
+            mm << i << "," << idx << "," << strain << "," << declarer
+               << "," << a << "," << b << "," << (a - b) << "\n";
+            totalMismatches++;
+          }
+          else
+          {
+            totalMatches++;
+          }
+        }
+      }
+
+      if (ShouldPrintProgress(i + 1, nDeals))
+        PrintProgress("oob-verify", i + 1, nDeals, t0);
+    }
+    mm.close();
+
+    const chrono::high_resolution_clock::time_point t1 =
+      chrono::high_resolution_clock::now();
+    const double oobMs =
+      chrono::duration_cast<chrono::duration<double, milli> >(t1 - t0).count();
+
+    const double ddssRate = (ddssMs > 0.0) ? (nDeals * 1000.0 / ddssMs) : 0.0;
+    const double oobRate = (oobMs > 0.0) ? (nDeals * 1000.0 / oobMs) : 0.0;
+
+    cout << "\n--- Timing ---\n";
+    cout << "  ddss:  " << fixed << setprecision(1) << ddssMs << " ms  ("
+         << setprecision(1) << ddssRate << " tables/s)\n";
+    cout << "  OOB:   " << fixed << setprecision(1) << oobMs << " ms  ("
+         << setprecision(1) << oobRate << " tables/s)\n";
+    if (oobMs > 0.0 && ddssMs > 0.0)
+    {
+      const double ratio = oobMs / ddssMs;
+      if (ratio > 1.0)
+        cout << "  ddss is " << setprecision(2) << ratio << "x faster than OOB\n";
+      else if (ratio < 1.0)
+        cout << "  OOB is " << setprecision(2) << (1.0 / ratio) << "x faster than ddss\n";
+      else
+        cout << "  Same speed\n";
+    }
+
+    const int totalCells = nDeals * 20;
+    cout << "\n--- Totals ---\n";
+    cout << "  Cells compared: " << totalCells << "\n";
+    cout << "  Matches:        " << totalMatches << "\n";
+    cout << "  Mismatches:     " << totalMismatches << "\n";
+    if (oobErrors > 0)
+      cout << "  OOB errors:     " << oobErrors << "\n";
+
+    if (totalMismatches == 0)
+      cout << "  Result: PASS\n";
+    else
+      cout << "  Result: FAIL\n"
+           << "  Mismatches written to: " << mmPath << "\n";
+
+    cout << "==============================\n\n";
+
+    return totalMismatches;
+  }
 }
 
 
 vector<RandomDeal> GenerateRandomDeals(
   const int numDeals,
-  const int seed,
-  const int reducedCards)
+  const int seed)
 {
   vector<RandomDeal> out;
   out.resize(static_cast<unsigned>(numDeals));
 
   mt19937 rng(static_cast<unsigned>(seed));
-  const int cardsPerHand = clamp_int(reducedCards, 1, 13);
 
   vector<Card> deck;
   deck.reserve(52U);
@@ -271,11 +388,7 @@ vector<RandomDeal> GenerateRandomDeals(
     for (int off = 0; off < DDS_HANDS; off++)
     {
       const int seat = (dealer + off) % DDS_HANDS;
-      vector<Card> reduced;
-      reduced.reserve(static_cast<size_t>(cardsPerHand));
-      for (int c = 0; c < cardsPerHand; c++)
-        reduced.push_back(handCards[seat][static_cast<size_t>(c)]);
-      pbn += SeatOrderPBN(reduced);
+      pbn += SeatOrderPBN(handCards[seat]);
       if (off + 1 != DDS_HANDS)
         pbn += " ";
     }
@@ -306,7 +419,7 @@ bool RunBackendEvaluation(
   }
 
   vector<RandomDeal> deals = GenerateRandomDeals(
-    options.randomDeals, options.randomSeed, options.reducedCards);
+    options.randomDeals, options.randomSeed);
   const int nDeals = static_cast<int>(deals.size());
   const int cells = nDeals * 20;
   cout << "Solving " << nDeals << " random deals (CPU exact)\n";
@@ -316,16 +429,11 @@ bool RunBackendEvaluation(
     dealPbns[static_cast<unsigned>(i)] = deals[static_cast<unsigned>(i)].deal;
 
   vector<ddTableResults> results;
-  const chrono::high_resolution_clock::time_point t0 =
-    chrono::high_resolution_clock::now();
+  double elapsedMs = 0.0;
 
-  if (!SolveCpuExactBatched(dealPbns, nDeals, results, "cpu-exact"))
+  if (!SolveCpuExactBatched(dealPbns, nDeals, results, "cpu-exact", &elapsedMs))
     return false;
 
-  const chrono::high_resolution_clock::time_point t1 =
-    chrono::high_resolution_clock::now();
-  const double elapsedMs =
-    chrono::duration_cast<chrono::duration<double, milli> >(t1 - t0).count();
   const double secs = elapsedMs / 1000.0;
   const double tablesPerSec = (secs > 0.0 ? static_cast<double>(nDeals) / secs : 0.0);
   const double solutionsPerSec = (secs > 0.0 ? static_cast<double>(cells) / secs : 0.0);
@@ -338,6 +446,20 @@ bool RunBackendEvaluation(
   const string summaryPath = options.reportDir + "/dds_solve_summary.json";
   WriteSummaryJson(summaryPath, nDeals, cells, 0, 1.0, 0.0,
     elapsedMs, tablesPerSec, solutionsPerSec);
+
+  // OOB cross-verification if --verify is enabled.
+  if (options.verify)
+  {
+    OobDds oob;
+    if (oob.Load(options.oobDll))
+    {
+      oob.PrintStatus();
+      oob.PrintInfo();
+      oob.SetMaxThreads(options.numThreads);
+      CompareWithOob(oob, dealPbns, results, nDeals, elapsedMs,
+        options.reportDir, "oob_mismatches.csv");
+    }
+  }
 
   return true;
 }
@@ -358,6 +480,44 @@ namespace
     const string& source)
   {
     return source.rfind("http://", 0) == 0 || source.rfind("https://", 0) == 0;
+  }
+
+  // Convert GitHub blob/tree URLs to raw content URLs.
+  // e.g.  https://github.com/user/repo/blob/branch/path
+  //    -> https://raw.githubusercontent.com/user/repo/refs/heads/branch/path
+  string NormalizeGitHubUrl(
+    const string& url)
+  {
+    const string blobPrefix = "https://github.com/";
+    if (url.rfind(blobPrefix, 0) != 0)
+      return url;
+
+    string tail = url.substr(blobPrefix.size());
+
+    // Find /blob/ or /tree/ segment after user/repo.
+    const size_t slashCount = 2; // skip user/repo (2 slashes)
+    size_t pos = 0;
+    for (size_t n = 0; n < slashCount && pos != string::npos; n++)
+      pos = tail.find('/', pos + (n > 0 ? 1 : 0));
+
+    if (pos == string::npos)
+      return url;
+
+    string userRepo = tail.substr(0, pos);
+    string rest = tail.substr(pos); // starts with /blob/branch/...
+
+    const string blobSeg = "/blob/";
+    const string treeSeg = "/tree/";
+    string branchAndPath;
+    if (rest.rfind(blobSeg, 0) == 0)
+      branchAndPath = rest.substr(blobSeg.size());
+    else if (rest.rfind(treeSeg, 0) == 0)
+      branchAndPath = rest.substr(treeSeg.size());
+    else
+      return url;
+
+    return "https://raw.githubusercontent.com/" + userRepo +
+      "/refs/heads/" + branchAndPath;
   }
 
   string Trim(
@@ -505,27 +665,51 @@ namespace
       return true;
     }
 
-#ifdef _WIN32
-    string safeUrl = source;
-    for (size_t i = 0; i < safeUrl.size(); i++)
-      if (safeUrl[i] == '\'')
-        safeUrl.insert(i++, "'");
-    const string psExpr =
-      "\"$ProgressPreference='SilentlyContinue'; "
-      "(Invoke-WebRequest -UseBasicParsing -Uri '" + safeUrl + "').Content\"";
+    // Auto-convert github.com/blob URLs to raw content URLs.
+    const string url = NormalizeGitHubUrl(source);
+    if (url != source)
+      cout << "  URL rewritten to: " << url << "\n";
 
+    auto StripBom = [](string& s)
+    {
+      if (s.size() >= 3 &&
+          static_cast<unsigned char>(s[0]) == 0xEF &&
+          static_cast<unsigned char>(s[1]) == 0xBB &&
+          static_cast<unsigned char>(s[2]) == 0xBF)
+        s.erase(0, 3);
+    };
+
+#ifdef _WIN32
     auto RunReadCmd = [&](const string& cmd) -> bool
     {
-      FILE * fp = _popen(cmd.c_str(), "r");
+      FILE * fp = _popen(cmd.c_str(), "rb");
       if (! fp)
         return false;
       char buf[4096];
       textOut = "";
-      while (fgets(buf, sizeof(buf), fp))
-        textOut += buf;
+      size_t n;
+      while ((n = fread(buf, 1, sizeof(buf), fp)) > 0)
+        textOut.append(buf, n);
       const int rc = _pclose(fp);
-      return rc == 0 && textOut != "";
+      if (rc != 0 || textOut == "")
+        return false;
+      StripBom(textOut);
+      return true;
     };
+
+    // Try curl first -- it writes raw bytes faithfully.
+    if (RunReadCmd("curl.exe -fsSL \"" + url + "\" 2>nul"))
+      return true;
+
+    // Fallback to PowerShell Invoke-WebRequest.
+    string safeUrl = url;
+    for (size_t i = 0; i < safeUrl.size(); i++)
+      if (safeUrl[i] == '\'')
+        safeUrl.insert(i++, "'");
+    const string psExpr =
+      "\"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+      "$ProgressPreference='SilentlyContinue'; "
+      "(Invoke-WebRequest -UseBasicParsing -Uri '" + safeUrl + "').Content\"";
 
     char psPathBuf[MAX_PATH];
     const DWORD psPathLen = SearchPathA(nullptr, "powershell.exe", nullptr,
@@ -544,12 +728,26 @@ namespace
         return true;
     }
 
-    if (RunReadCmd("curl.exe -fsSL \"" + source + "\" 2>nul"))
-      return true;
-
     return false;
 #else
-    string safeUrl = source;
+    auto RunPipeCmd = [&](const string& cmd) -> bool
+    {
+      FILE * fp = popen(cmd.c_str(), "r");
+      if (! fp)
+        return false;
+      char buf[4096];
+      textOut = "";
+      size_t n;
+      while ((n = fread(buf, 1, sizeof(buf), fp)) > 0)
+        textOut.append(buf, n);
+      int rc = pclose(fp);
+      if (rc != 0 || textOut == "")
+        return false;
+      StripBom(textOut);
+      return true;
+    };
+
+    string safeUrl = url;
     for (size_t i = 0; i < safeUrl.size(); i++)
     {
       if (safeUrl[i] == '\'')
@@ -559,27 +757,13 @@ namespace
       }
     }
 
-    const string curlCmd = "curl -fsSL '" + safeUrl + "' 2>/dev/null";
-    FILE * fp = popen(curlCmd.c_str(), "r");
-    if (! fp)
-      return false;
-    char buf[4096];
-    textOut = "";
-    while (fgets(buf, sizeof(buf), fp))
-      textOut += buf;
-    int rc = pclose(fp);
-    if (rc == 0 && textOut != "")
+    if (RunPipeCmd("curl -fsSL '" + safeUrl + "' 2>/dev/null"))
       return true;
 
-    const string wgetCmd = "wget -qO- '" + safeUrl + "' 2>/dev/null";
-    fp = popen(wgetCmd.c_str(), "r");
-    if (! fp)
-      return false;
-    textOut = "";
-    while (fgets(buf, sizeof(buf), fp))
-      textOut += buf;
-    rc = pclose(fp);
-    return rc == 0 && textOut != "";
+    if (RunPipeCmd("wget -qO- '" + safeUrl + "' 2>/dev/null"))
+      return true;
+
+    return false;
 #endif
   }
 
@@ -666,8 +850,9 @@ namespace
         if (! ExtractQuoted(t, quoted))
           continue;
         PbnDealEntry e;
-        memset(&e, 0, sizeof(e));
+        memset(&e.deal, 0, sizeof(e.deal));
         e.hasReferenceTable = false;
+        memset(&e.referenceTable, 0, sizeof(e.referenceTable));
         e.boardLabel = currentBoard;
         e.dealText = quoted;
         if (ParseDealFromCards(quoted, e.deal))
@@ -689,8 +874,9 @@ namespace
         if (! ExtractQuoted(t, quoted))
           continue;
         PbnDealEntry e;
-        memset(&e, 0, sizeof(e));
+        memset(&e.deal, 0, sizeof(e.deal));
         e.hasReferenceTable = false;
+        memset(&e.referenceTable, 0, sizeof(e.referenceTable));
         e.boardLabel = currentBoard;
         e.dealText = quoted;
         if (ParseDealFromCards(quoted, e.deal))
@@ -801,9 +987,11 @@ bool RunPbnEvaluation(
   }
 
   string text;
+  const string resolvedSource = IsUrl(options.pbnSource)
+    ? NormalizeGitHubUrl(options.pbnSource) : options.pbnSource;
   if (! LoadTextFromSource(options.pbnSource, text))
   {
-    cout << "Could not read PBN source '" << options.pbnSource << "'\n";
+    cout << "Could not read PBN source '" << resolvedSource << "'\n";
     return false;
   }
 
@@ -849,7 +1037,8 @@ bool RunPbnEvaluation(
   cout << " (" << referenceIdx.size() << " with embedded DD tables)\n";
 
   vector<ddTableResults> exact;
-  if (!SolveCpuExactBatched(pbnDeals, nDeals, exact, "pbn-exact"))
+  double ddssMs = 0.0;
+  if (!SolveCpuExactBatched(pbnDeals, nDeals, exact, "pbn-exact", &ddssMs))
     return false;
 
   const int numCells = nDeals * 20;
@@ -906,6 +1095,23 @@ bool RunPbnEvaluation(
     cout << "  vs PBN reference: exact_match=" << fixed << setprecision(6) << pExactRate
          << " mae=" << pMae << " off1=" << pOff1Rate << " off2=" << pOff2Rate << "\n";
 
+  // OOB cross-verification if --verify is enabled.
+  bool hasOob = false;
+  vector<ddTableResults> oobResults;
+  if (options.verify)
+  {
+    OobDds oob;
+    if (oob.Load(options.oobDll))
+    {
+      oob.PrintStatus();
+      oob.PrintInfo();
+      oob.SetMaxThreads(options.numThreads);
+      CompareWithOob(oob, pbnDeals, exact, nDeals, ddssMs,
+        options.reportDir, "oob_mismatches.csv", &oobResults);
+      hasOob = (oobResults.size() == static_cast<size_t>(nDeals));
+    }
+  }
+
   const string csvPath = options.reportDir + "/pbn_combined_summary.csv";
   ofstream summary(csvPath.c_str());
   summary << "num_deals,num_cells,num_deals_with_pbn_table,exact_match_vs_pbn,mae_vs_pbn,off1_vs_pbn,off2_vs_pbn\n";
@@ -931,17 +1137,22 @@ bool RunPbnEvaluation(
            << "th{background:#f5f5f5;position:sticky;top:0;} "
            << ".mono{font-family:Consolas,monospace;white-space:nowrap;} "
            << ".small{font-size:11px;color:#444;} "
+           << ".mismatch{background:#fdd;} "
            << "</style></head><body>";
       html << "<h2>DDS PBN Evaluation Report</h2>";
       html << "<p><b>Source:</b> " << HtmlEscape(options.pbnSource) << "<br>";
+      if (hasOob)
+        html << "<b>OOB DLL:</b> " << HtmlEscape(options.oobDll) << "<br>";
       html << "<b>Deals:</b> " << nDeals << " &nbsp; <b>Cells:</b> " << numCells << "</p>";
 
       html << "<h3>Per-board Results</h3>";
       html << "<table><thead><tr>"
            << "<th>row</th><th>board</th><th>deal</th>"
            << "<th>cpu_exact_dd20</th>"
-           << "<th>pbn_ref_dd20</th>"
-           << "</tr></thead><tbody>";
+           << "<th>pbn_ref_dd20</th>";
+      if (hasOob)
+        html << "<th>oob_dd20</th>";
+      html << "</tr></thead><tbody>";
       for (int i = 0; i < nDeals; i++)
       {
         string b = boardLabels[static_cast<size_t>(i)];
@@ -965,6 +1176,15 @@ bool RunPbnEvaluation(
           html << "<td class=\"mono\">" << HtmlEscape(TableCompact(referenceTables[static_cast<size_t>(i)])) << "</td>";
         else
           html << "<td>-</td>";
+
+        if (hasOob)
+        {
+          const string oobStr = TableCompact(oobResults[static_cast<size_t>(i)]);
+          const string ddssStr = TableCompact(exact[static_cast<size_t>(i)]);
+          const string cls = (oobStr != ddssStr) ? "mono mismatch" : "mono";
+          html << "<td class=\"" << cls << "\">"
+               << HtmlEscape(oobStr) << "</td>";
+        }
         html << "</tr>";
       }
       html << "</tbody></table>";

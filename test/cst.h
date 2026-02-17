@@ -48,11 +48,12 @@ struct OptionsType
   int numThreads;
   int memoryMB;
   int randomDeals;
-  int reducedCards;
   int randomSeed;
   string reportDir;
   string pbnSource;
   string htmlReport;
+  string oobDll;
+  bool verify;
 };
 
 #endif

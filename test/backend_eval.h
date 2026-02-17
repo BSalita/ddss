@@ -27,7 +27,6 @@ bool RunPbnEvaluation(
 
 std::vector<RandomDeal> GenerateRandomDeals(
   int numDeals,
-  int seed,
-  int reducedCards);
+  int seed);
 
 #endif

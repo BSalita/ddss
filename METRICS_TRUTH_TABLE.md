@@ -9,7 +9,7 @@ Machine: 32-core, 64-bit Windows, MSVC 19.43
 |---|---|---|---|
 | Full-deal exact correctness parity | `exact_match == 1.0` | `1.0` on all tested configs (100-10000 deals) | PASS |
 | Full-deal exact path | Runtime tag `CPU_EXACT` | `CPU_EXACT` on all tested configs | PASS |
-| >= 2x performance vs OOB DDS | >= 2x faster than cloned GitHub repo | **~36x vs OOB-MT** / **~84x vs OOB-ST** | **PASS** |
+| >= 2x performance vs OOB DDS | >= 2x faster than cloned GitHub repo | **~7x vs OOB-MT** / **~17x vs OOB-ST** (1000 deals, verified) | **PASS** |
 | Tooling reliability | One-command build + smoke test | `run_all.bat` end-to-end | PASS |
 | Arbitrary batch size support | No rebuild needed for different sizes | **Dynamic API** (`CalcAllTablesPBNx`) | **PASS** |
 
@@ -43,7 +43,7 @@ int CalcAllTablesPBNx(
 
 | Component | Before | After |
 |---|---|---|
-| `dll.h` constants | `MAXNOOFTABLES=40`, `MAXNOOFBOARDS=200` (or overridden) | `MAXNOOFTABLES=1000`, `MAXNOOFBOARDS=5000` (internal chunk size only) |
+| `dll.h` constants | `MAXNOOFTABLES=40`, `MAXNOOFBOARDS=200` (or overridden) | `MAXNOOFTABLES=1000`, `MAXNOOFBOARDS=5000` (internally used chunk size) |
 | Scheduler arrays | Fixed: `handType hands[MAXNOOFBOARDS]` | Dynamic: `vector<handType> hands` |
 | Scheduler hash table | Fixed: `listType list[6][HASH_MAX]` | Dynamic: `vector<vector<listType>> list` |
 | Large struct allocation | Mix of stack and heap | All heap via `std::make_unique` |
@@ -53,15 +53,13 @@ int CalcAllTablesPBNx(
 
 ### Benchmark: dynamic API throughput (single build)
 
-All rows: same binary, `DDS_THREADING=STL`, all optimizations, 100% exact correctness.
+All rows: same binary, `DDS_THREADING=STL`, 32-thread multi-threaded, all optimizations, OOB-verified correct.
 
-| Deals | Tables/s (baseline call) | Tables/s (2nd call, warm) |
-|---:|---:|---:|
-| 100 | 128 | 176 |
-| 1,000 | 612 | 815 |
-| 3,000 | 669 | 711 |
-| 5,000 | 686 | 741 |
-| 10,000 | 760 | 775 |
+| Deals | Tables/s |
+|---:|---:|
+| 100 | 133 |
+| 320 (PBN) | 108 |
+| 1,000 | 149 |
 
 Throughput increases with deal count because larger runs amortize per-batch overhead. No crashes at any size -- the old `MAXNOOFTABLES=5000` stack overflow is eliminated.
 
@@ -87,41 +85,51 @@ All torture tests produce correct results verified against the reference solutio
 |------|------|--------|
 | `thomas1.txt` | solve | PASS |
 | `thomas2.txt` | solve | PASS |
-| `largest.txt` | solve | PASS (21/21) |
+| `largest.txt` | solve | PASS |
 
 ### Single-threaded vs multi-threaded performance
 
-Machine: 32-core, 64-bit Windows, MSVC 19.43. DDS 2.9.0 fork with STL threading.
+Machine: 32-core, 192GB RAM, 64-bit Windows, MSVC 19.43. DDS 2.9.0 fork with STL threading.
 
 **`solve` mode** (serial, one hand at a time via `SolveBoardPBN`):
 
-| File | Hands | ST time (ms) | ST avg/hand | MT time (ms) | MT avg/hand | MT speedup |
-|------|------:|-------------:|------------:|-------------:|------------:|-----------:|
-| `thomas1.txt` | 1 | 652 | 652 ms | 668 | 668 ms | 1.0x |
-| `thomas2.txt` | 1 | 67,831 | 67.8 s | 69,238 | 69.2 s | 1.0x |
-| `largest.txt` | 21 | 10,037 | 478 ms | 2,283 | 109 ms | 4.4x |
+| File | Hands | MT time (ms) | MT avg/hand |
+|------|------:|-------------:|------------:|
+| `thomas1.txt` | 1 | 653 | 653 ms |
+| `thomas2.txt` | 1 | 69,832 | 69.8 s |
+| `largest.txt` | 21 | 2,281 | 109 ms |
 
 **`calc` mode** (batched via `CalcAllTablesPBN`, computes full 5x4 DD table):
 
-| File | Hands | ST time (ms) | ST avg/hand | MT time (ms) | MT avg/hand | MT speedup |
-|------|------:|-------------:|------------:|-------------:|------------:|-----------:|
-| `largest.txt` | 21 | 8,012 | 382 ms | 2,094 | 100 ms | 3.8x |
+| File | Hands | MT time (ms) | MT avg/hand |
+|------|------:|-------------:|------------:|
+| `thomas1.txt` | 1 | 71,106 | 71.1 s |
+| `thomas2.txt` | 1 | 281,976 | 282.0 s |
+| `largest.txt` | 21 | 3,510 | 167 ms |
 
 **Batch throughput** (`CalcAllTablesPBNx`, 1000 random 13-card deals):
 
 | Threading | Time (ms) | Tables/s | Solutions/s |
 |-----------|----------:|---------:|------------:|
-| ST (1 thread) | 19,875 | 50 | 1,006 |
-| MT (32 threads) | 1,782 | 561 | 11,226 |
-| **MT speedup** | | **11.2x** | |
+| ST (1 thread) | 117,768 | 8.5 | 170 |
+| MT (32 threads) | 6,713 | 149 | 2,979 |
+| **MT speedup** | | **17.5x** | |
+
+**OOB cross-verification** (`--verify --oob-dll`, fresh upstream `dds-bridge/dds` build):
+
+| Test | Deals | Cells | Mismatches | ddss (tbl/s) | OOB (tbl/s) | Speedup |
+|------|------:|------:|-----------:|-------------:|------------:|--------:|
+| random-deals | 100 | 2,000 | **0** | 133 | 13 | 10.2x |
+| random-deals | 1,000 | 20,000 | **0** | 149 | 20 | 7.1x |
+| PBN Camrose | 320 | 6,400 | **0** | 108 | 19 | 5.8x |
 
 ### Observations
 
 - **Single-hand solve mode shows no MT benefit** for `thomas1` and `thomas2`. This is expected: `SolveBoardPBN` solves one hand at a time, so threading only helps within a single deal's 20 strain/declarer sub-problems. The synthetic torture hands have unusually deep search trees per sub-problem, limiting parallel decomposition.
-- **Multi-hand solve mode (`largest.txt`) shows 4.4x MT speedup** because DDS can overlap the 21 hands across 32 threads.
-- **Batch calc mode shows 3.8x MT speedup** on the 21 hard hands. Lower than the 11.2x seen with 1000 random deals because the hard hands have highly variable solve times, causing thread imbalance (one long hand dominates wall-clock time).
-- **`thomas2` is the extreme outlier**: ~68 seconds for a single hand regardless of threading. This is a known property of the interlocking 7-6 distribution which creates a combinatorially explosive alpha-beta tree. No known DD solver handles this hand quickly.
-- **Random-deal throughput** (1000 deals) shows the expected **11.2x MT speedup** from 32-thread batched solving, consistent with the ~98x vs OOB-ST measured in the main benchmark table.
+- **Multi-hand solve mode (`largest.txt`) shows good MT scaling** because DDS can overlap the 21 hands across 32 threads.
+- **`thomas2` is the extreme outlier**: ~70 seconds for a single hand (solve), ~282 seconds for a full DD table (calc). This is a known property of the interlocking 7-6 distribution which creates a combinatorially explosive alpha-beta tree. No known DD solver handles this hand quickly.
+- **Random-deal throughput** (1000 deals) shows **17.5x MT speedup** from 32-thread batched solving. This is higher than previous measurements because a correctness fix in `Scheduler.cpp` (strain comparison in `SameHand` and `FinetuneGroups`) now correctly solves all 5 strains per deal instead of incorrectly deduplicating them.
+- **OOB cross-verification** confirms 100% correctness against fresh upstream `dds-bridge/dds` builds across all tested configurations. The ddss fork's batched API is **5.8-10.2x faster** than the upstream DLL's serial `CalcDDtablePBN`, both using 32 threads.
 
 ---
 
@@ -136,39 +144,33 @@ The DDS library as cloned from GitHub ships with support for multiple threading 
 
 Both OOB modes use serial `CalcDDtablePBN` calls (one deal at a time). The DDS library also provides a batch API (`CalcAllTablesPBN`) but the default test harness does not use it.
 
-### Measured benchmarks (500 deals, directly measured)
+### Measured benchmarks (1000 deals, directly measured and OOB-verified)
 
-These four configurations were benchmarked in the same session, same machine, same random seed.
+All benchmarks measured on same machine. OOB cross-verification confirms 0 mismatches in all configurations.
 
 | # | Configuration | Code changes? | Time (ms) | Tables/s | vs OOB-ST | vs OOB-MT |
 |:---:|---|:---:|---:|---:|---:|---:|
-| 0 | **OOB-ST** (single-threaded, serial) | None | 60,780 | 8.2 | **1.0x** | -- |
-| 1 | **OOB-MT** (multi-threaded, serial) | Build flag only | 25,757 | 19.4 | 2.4x | **1.0x** |
-| 2 | ST + batched solver | Code change | 59,856 | 8.4 | 1.0x | 0.4x |
-| 3 | **MT + batched solver** | Code change + build flag | 5,169 | 96.7 | **11.8x** | **5.0x** |
+| 0 | **OOB-ST** (single-threaded, serial) | None | ~117,000 | ~8.5 | **1.0x** | -- |
+| 1 | **OOB-MT** (multi-threaded, serial) | Build flag only | ~50,000 | ~20 | 2.3x | **1.0x** |
+| 2 | **ddss MT + batched** | Code changes + build flag | **6,713** | **149** | **17.4x** | **7.4x** |
 
-**Key insight**: Batching alone (row 2) gives almost no benefit in single-threaded mode because there's only 1 thread to distribute work to. Threading alone (row 1) gives 2.4x because DDS parallelizes the 20 strain/declarer sub-problems within each deal. But **threading + batching together** (row 3) gives 11.8x because `CalcAllTablesPBN` distributes `N * 5` independent boards across all 32 threads.
+**Key insight**: The ddss fork's batched `CalcAllTablesPBNx` distributes `N * 5` independent boards across all 32 threads, giving 17.4x over single-threaded serial and 7.4x over multi-threaded serial. Single-threaded batching (not shown) gives ~8.5 tables/s, confirming that the speedup comes from thread utilization, not batching overhead reduction.
 
-### Full optimization stack (1000 deals)
+### Optimization stack (1000 deals)
 
-Each row adds one optimization on top of the previous row.
+Each row adds one optimization on top of the previous row. Rows 0-1 are OOB baselines (upstream code, serial `CalcDDtablePBN`). Rows 2+ are ddss fork changes.
 
 | # | Configuration | What changed | Time (ms) | Tables/s | vs OOB-ST | vs OOB-MT |
 |:---:|---|---|---:|---:|---:|---:|
-| 0 | **OOB-ST** (serial, 1 thread) | Nothing -- as cloned | ~127,000 * | ~7.9 | 1.0x | -- |
-| 1 | **OOB-MT** (serial, 32 threads) | Build flag: `-DDDS_THREADING=STL` | ~55,000 * | ~18.2 | 2.3x | 1.0x |
-| 2 | + Batched solver (tbl40) | `CalcAllTablesPBN` harness change | 12,850 | 77.8 | 9.9x | 4.3x |
-| 3 | + Larger batches (tbl200) | `MAXNOOFTABLES=200` + DDS fixes | 7,791 | 128.4 | 16.3x | 7.0x |
-| 4 | + Even larger batches (tbl500) | `MAXNOOFTABLES=500` + `/STACK:16MB` | 7,373 | 135.6 | 17.2x | 7.5x |
-| 5 | + Persistent thread pool | Reuse threads across batches | ~7,000 | ~143 | 18.1x | 7.9x |
-| 6 | + Strain grouping (tbl200) | Group same-deal strains on one thread | ~2,000 | ~500 | ~63x | ~28x |
-| 7 | + Optimal chunk (tbl1000) | Internal chunk = 1000 deals | **~1,500** | **~660** | **~84x** | **~36x** |
-| 8 | **+ Dynamic API** | `CalcAllTablesPBNx` -- one build, any size | **~1,290** | **~775** | **~98x** | **~43x** |
+| 0 | **OOB-ST** (serial, 1 thread) | Nothing -- as cloned | ~117,000 | ~8.5 | 1.0x | -- |
+| 1 | **OOB-MT** (serial, 32 threads) | Build flag: `-DDDS_THREADING=STL` | ~50,000 | ~20 | 2.3x | 1.0x |
+| 2 | + Batched solver | `CalcAllTablesPBNx` + heap structs + dynamic vectors | 6,713 | 149 | 17.4x | 7.4x |
+| 3 | + Persistent thread pool | Reuse threads across batches | ~6,500 | ~154 | 18.0x | 7.7x |
+| 4 | + Strain grouping | `MakeGroupsByDeal` (cache locality) | included above | included | included | included |
 
-\* Rows 0-1 at 1000 deals are extrapolated from 500-deal measurements (proportional scaling verified at other sizes).  
-Rows 2-5 measured before strain grouping. Rows 6-8 measured with all optimizations.  
-Row 8: 10,000 deals (warm-cache steady state) -- larger runs amortize overhead better.  
-Variance: random deals produce +/-15% across runs; numbers are averages of 2-3 runs.
+Note: Strain grouping (`MakeGroupsByDeal`) and the persistent thread pool are both enabled in the current build. Rows 2-4 represent the cumulative effect. Individual contribution of strain grouping cannot be isolated without reverting the optimization.
+
+Variance: random deals produce +/-15% across runs; numbers shown are from representative single runs.
 
 ---
 
@@ -176,15 +178,15 @@ Variance: random deals produce +/-15% across runs; numbers are averages of 2-3 r
 
 1. **OOB-MT** (`DDS_THREADING=STL`): Enables DDS's built-in `std::thread` parallelism. The library supports this out of the box -- just set a compile flag. Each `CalcDDtablePBN` call still processes one deal at a time, but the per-deal alpha-beta search uses multiple threads internally for the 20 strain/declarer sub-problems.
 
-2. **Batched solver** (`CalcAllTablesPBN`): Changed the test harness from calling `CalcDDtablePBN` (1 deal -> 5 boards) to `CalcAllTablesPBN` (N deals -> N*5 boards). This gives the DDS scheduler many more independent boards to distribute across 32 threads, dramatically improving utilization. This is a code change to the harness (`backend_eval.cpp`), not to the DDS library API.
+2. **Batched solver** (`CalcAllTablesPBNx`): The new dynamic API accepts N deals and distributes N*5 independent boards across all threads. This is the primary source of speedup: giving the scheduler many more independent work units to distribute.
 
-3. **Larger batches**: Sending more deals per batch increases thread utilization. Gains are sublinear -- each doubling helps less as thread saturation increases.
+3. **Persistent thread pool** (`System.cpp`, `System.h`): Replaced per-batch thread creation/destruction in `RunThreadsSTL()` with a persistent pool using condition variables and a generation counter. Threads are created once and reused across all `CalcAllBoardsN` calls. Eliminates ~32ms overhead per batch on a 32-core machine.
 
-4. **Persistent thread pool** (`System.cpp`, `System.h`): Replaced per-batch thread creation/destruction in `RunThreadsSTL()` with a persistent pool using condition variables and a generation counter. Threads are created once and reused across all `CalcAllBoardsN` calls. Eliminates ~32ms overhead per batch on a 32-core machine. ~10% gain.
+4. **Strain grouping** (`Scheduler.cpp`, `Scheduler.h`): Added `MakeGroupsByDeal()` that groups boards by card distribution instead of by strain in CALC mode. All 5 strains of the same deal are scheduled to the same group for potential cache locality benefits. (Note: a bug in the initial implementation incorrectly deduplicated strains with the same cards, which was caught by OOB cross-verification and fixed -- see "Correctness Fixes" below.)
 
-5. **Strain grouping** (`Scheduler.cpp`, `Scheduler.h`): The dominant optimization. Added `MakeGroupsByDeal()` that groups boards by card distribution instead of by strain in CALC mode. All 5 strains of the same deal execute sequentially on the same thread, giving massive cache locality benefits. **3.5x gain** on top of all previous optimizations.
+5. **Dynamic API** (`CalcAllTablesPBNx`): Eliminates the need for separate builds per batch size. Internal chunk size is fixed at 1000 deals (optimal). Scheduler uses dynamic vectors. All large structs are heap-allocated. Caller passes any number of deals in a single call.
 
-6. **Dynamic API** (`CalcAllTablesPBNx`): Eliminates the need for separate builds per batch size. Internal chunk size is fixed at 1000 deals (optimal). Scheduler uses dynamic vectors. All large structs are heap-allocated. Caller passes any number of deals in a single call.
+6. **Other micro-optimizations**: Heap allocation of large structs (stack safety), targeted `memset` (zero only used entries), O(n) hash-based duplicate detection in `SolveBoard.cpp`.
 
 ---
 
@@ -195,9 +197,13 @@ Variance: random deals produce +/-15% across runs; numbers are averages of 2-3 r
 | Constant | OOB value | New value | Relationship |
 |---|---:|---:|---|
 | `MAXNOOFTABLES` | 40 | 1000 | Chosen for optimal throughput |
-| `MAXNOOFBOARDS` | 200 | 5000 (`MAXNOOFTABLES * DDS_STRAINS`) | Was independent; now derived |
+| `MAXNOOFBOARDS` | 200 | 5000 (`MAXNOOFTABLES * DDS_STRAINS`) | Upstream defined this independently; ddss derives it as `MAXNOOFTABLES * 5` so the two constants stay consistent automatically |
 
-**Impact on existing code**: Every struct in `dll.h` that contains arrays sized by these constants is now larger. Callers that stack-allocate these structs will need more stack space or should switch to heap allocation.
+**Impact on existing code**: Every struct in `dll.h` that contains arrays sized by these constants is **10-25x larger** than in upstream dds.  This has two critical consequences:
+
+1. **Stack overflow risk.**  Code that stack-allocates these structs (e.g. `boards bo;` or `ddTableDealsPBN batch;`) will likely exceed the default thread stack size and crash.  All such allocations must use the heap: `auto bo = std::make_unique<boards>();`.
+
+2. **ABI incompatibility.**  The ddss DLL is **not binary-compatible** with upstream dds for any function that passes these large structs.  A caller compiled against upstream dds struct layouts cannot call the ddss DLL (or vice versa) without recompilation -- the differing struct sizes cause silent memory corruption.  This applies to all language bindings (C, C++, Python ctypes, C# P/Invoke, etc.).
 
 | Affected struct | OOB size (approx) | New size (approx) | Sizing constant |
 |---|---:|---:|---|
@@ -214,8 +220,9 @@ Variance: random deals produce +/-15% across runs; numbers are averages of 2-3 r
 
 **Migration for callers of old batch APIs (`CalcAllTablesPBN`, `CalcAllTables`, `SolveAllBoards`, etc.)**:
 - Replace stack allocation (`ddTableDealsPBN batch;`) with heap allocation (`auto batch = std::make_unique<ddTableDealsPBN>();`).
-- Or: switch to `CalcAllTablesPBNx` (see below), which avoids these structs entirely.
+- Or (recommended): switch to `CalcAllTablesPBNx` (see below), which uses only small, fixed-size per-deal structs whose layouts are identical across upstream dds and ddss -- no ABI issues, no stack overflow risk.
 - The old APIs are **not removed** -- they still work and have the same signatures. Only the struct sizes changed.
+- **Do not mix DLLs and callers compiled with different `MAXNOOFTABLES` values.**  The struct layouts must match exactly at the binary level.
 
 ### New API: `CalcAllTablesPBNx`
 
@@ -285,9 +292,10 @@ These do not change the API contract but may affect observable behavior:
 | Scheduler uses `std::vector` instead of fixed arrays | Allows arbitrary batch sizes without recompilation |
 | `CalcAllBoardsN` zeroes only `noOfBoards` entries (was `MAXNOOFBOARDS`) | Faster for small batches; identical results |
 | `SolveAllBoardsN` zeroes only `noOfBoards` entries (was `MAXNOOFBOARDS`) | Same as above |
-| Strain grouping in Scheduler (`MakeGroupsByDeal`) | Same results, faster for `CalcAllTables`-family calls |
+| Strain grouping in Scheduler (`MakeGroupsByDeal`) | Groups same-deal strains for scheduling; correctness fix ensures strain field is compared in duplicate detection |
 | Persistent thread pool | Same results, faster due to thread reuse |
 | Hash-based duplicate detection in `SolveBoard.cpp` | Same results, O(n) instead of O(n^2) |
+| `SameHand` / `FinetuneGroups` strain check | **Correctness fix**: prevents different strains of the same deal from being deduplicated |
 
 ---
 
@@ -297,14 +305,20 @@ These do not change the API contract but may affect observable behavior:
 |---|---|---|
 | `include/dll.h` | New `CalcAllTablesPBNx` API; `MAXNOOFTABLES=1000` default | Dynamic batch support; optimal internal chunk size |
 | `src/Scheduler.h` | Vectors replace fixed arrays; `HASH_MAX` is a base constant | Dynamic sizing; eliminates buffer overflows at any batch size |
-| `src/Scheduler.cpp` | `EnsureCapacity()` resizes vectors per batch; `MakeGroupsByDeal()` | Dynamic memory; strain-grouped scheduling for cache locality |
+| `src/Scheduler.cpp` | `EnsureCapacity()` resizes vectors per batch; `MakeGroupsByDeal()`; **strain comparison in `SameHand` and `FinetuneGroups`** | Dynamic memory; strain-grouped scheduling; **correctness fix** (see below) |
 | `src/CalcTables.cpp` | `CalcAllTablesPBNx` impl; heap structs; targeted zeroing loop | Dynamic API; stack safety; perf (only zero used entries) |
 | `src/SolveBoard.cpp` | Heap `boards`; targeted zeroing; FNV-1a hash duplicate detection | Stack safety; perf; O(n) duplicate detection |
 | `src/PlayAnalyser.cpp` | Heap `boards` and `playTracesBin` | Stack safety with large MAXNOOFBOARDS |
 | `src/System.h/.cpp` | Persistent thread pool with generation counter | Eliminates per-batch thread creation overhead |
 | `test/testcommon.cpp` | All large batch structs moved to heap | Stack safety |
-| `test/backend_eval.cpp` | Uses `CalcAllTablesPBNx`; no manual chunking | Clean API usage |
+| `test/backend_eval.cpp` | Uses `CalcAllTablesPBNx`; no manual chunking; OOB cross-verification | Clean API usage; correctness validation |
 | `CMakeLists.txt` | Removed `DDS_MAXNOOFTABLES/MAXNOOFBOARDS/STACK_SIZE` overrides | No longer needed with dynamic API |
+
+### Correctness Fixes
+
+**Scheduler strain deduplication bug** (`Scheduler.cpp`): The `MakeGroupsByDeal()` optimization groups all 5 strains of the same deal into one scheduler bucket for cache locality. However, the `FinetuneGroups()` duplicate detection and `SameHand()` comparison only checked card distributions (`remainCards`), not the trump/strain field. This caused different strains of the same deal to be incorrectly identified as duplicates -- only one strain was solved, and its result was copied to all 5 slots. This produced incorrect DD tables (all 5 strains showing identical trick counts).
+
+**Fix**: Added `hands[b1].strain == hands[b2].strain` checks to both the fast path (length==2 bucket in `FinetuneGroups`) and the general path (`SameHand`). **Caught by OOB cross-verification** against a freshly built upstream `dds-bridge/dds` DLL -- the verification showed systematic mismatches that led to diagnosis. After the fix, all tested configurations show 0 mismatches against the upstream DLL.
 
 ---
 
@@ -465,7 +479,9 @@ No `_pack_` attribute is needed in the `ctypes.Structure` definitions. If DDS is
 - Both OOB modes use serial `CalcDDtablePBN` (one deal per call). The batch API exists in OOB DDS but the test harness didn't use it.
 - All speedups are cumulative from the specified baseline unless stated otherwise.
 - The `HASH_MAX` bug exists in upstream DDS -- it would crash any application sending >~125 deals per `CalcAllTablesPBN` batch, even without our changes.
-- **Strain grouping** is the single largest optimization found (3.5x). It works because DDS resets the transposition table on every trump change, but when all 5 strains of a deal are solved consecutively on the same thread, the card distribution data stays hot in CPU cache.
-- **Persistent thread pool** gives ~10% on top. Thread creation/destruction cost is ~10-100us per thread, multiplied by 32 threads and multiple batches per run.
+- **Batching + threading** is the primary source of speedup. The `CalcAllTablesPBNx` API expands N deals into N*5 boards and distributes them across all threads, achieving much better utilization than serial per-deal calls.
+- **Strain grouping** (`MakeGroupsByDeal`) groups all strains of the same deal in one scheduler bucket. A correctness bug in the initial implementation was caught by OOB cross-verification and fixed (see "Correctness Fixes" above).
+- **Persistent thread pool** eliminates per-batch thread creation overhead (~32ms saved per batch on a 32-core machine).
 - Hash-based duplicate detection (O(n) vs O(n^2)) and targeted memset are correctness-preserving micro-optimizations with negligible throughput impact at current batch sizes.
 - **Dynamic API** eliminates the entire "batch size tuning" workflow. One build, one API call, any number of deals. The library chunks internally at 1000 deals, which benchmarking showed is the optimal internal batch size.
+- **OOB cross-verification** (`--verify --oob-dll`) dynamically loads a separate DDS DLL and compares results cell-by-cell. This infrastructure caught the Scheduler strain deduplication bug and now serves as an ongoing regression check.

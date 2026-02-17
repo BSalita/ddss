@@ -4,7 +4,7 @@ DDS is a double-dummy solver of bridge hands.  It is provided as a Windows DLL a
 
 DDS offers a wide range of functions, including par-score calculations.
 
-This `ddss` fork adds performance optimizations (up to ~98x vs out-of-box single-threaded) and a dynamic batch API (`CalcAllTablesPBNx`).  See `METRICS_TRUTH_TABLE.md` for benchmarks and API change details.
+This `ddss` fork adds performance optimizations (~17x vs OOB single-threaded, ~7x vs OOB multi-threaded), a dynamic batch API (`CalcAllTablesPBNx`), and OOB cross-verification (`--verify`).  All results verified cell-by-cell against a freshly built upstream DDS DLL.  See `METRICS_TRUTH_TABLE.md` for benchmarks and API change details.
 
 Based on DDS 2.9.0, licensed under the Apache 2.0 license in the LICENSE file.
 
@@ -27,7 +27,7 @@ Pierre Cossard contributed the code for multi-threading on the Mac using GDS.
 
 Soren Hein made a number of contributions before becoming a co-author starting with v2.8 in 2014.
 
-Robert Salita used AI (Claude Opus 4) to add batched solving, strain grouping, a persistent thread pool, and a dynamic batch API (`CalcAllTablesPBNx`), achieving ~43x throughput vs OOB multi-threaded (~98x vs OOB single-threaded) on a 32-core machine.
+Robert Salita used AI (Claude Opus 4) to add batched solving, strain grouping, a persistent thread pool, a dynamic batch API (`CalcAllTablesPBNx`), and OOB cross-verification (`--verify`), achieving ~7x throughput vs OOB multi-threaded (~17x vs OOB single-threaded) on a 32-core machine. All results verified cell-by-cell against a freshly built upstream DDS DLL.
 
 
 Overview
@@ -119,7 +119,32 @@ make -j$(sysctl -n hw.ncpu)
 
 # Random deals benchmark
 ./dtest --random-deals 1000 --report-dir benchmark
+
+# Cross-verify against upstream DDS DLL (requires dds_oob.dll)
+./dtest --random-deals 100 --verify
 ```
+
+### OOB cross-verification
+
+The `--verify` flag enables cell-by-cell comparison of DD results against an upstream (out-of-box) DDS DLL loaded at runtime.  This catches correctness regressions introduced by optimizations.
+
+**Setup:**
+1. Build an upstream `dds-bridge/dds` DLL from source (or obtain one).
+2. Place it as `dds_oob.dll` (Windows) or `dds_oob.so` (Linux/macOS) next to the `dtest` executable.  Or specify the path explicitly with `--oob-dll`.
+
+**How it works:**
+- The OOB DLL is dynamically loaded via `LoadLibraryA` (Windows) or `dlopen` (Linux/macOS).
+- Each deal is solved independently through the OOB DLL's `CalcDDtablePBN` and compared cell-by-cell against the ddss results.
+- Mismatches are reported to console and written to `oob_mismatches.csv` in the report directory.
+- HTML reports (when `--html-report` is used) include an `oob_dd20` column highlighting any disagreements.
+- Timing comparisons show ddss batched throughput vs OOB serial throughput.
+
+**Behavior:**
+- `--verify` alone: looks for `dds_oob.dll`/`dds_oob.so` next to the executable; errors if not found.
+- `--oob-dll path` alone: implicitly enables verification using the specified DLL.
+- Neither flag: no verification, normal solve only.
+
+**Note:** The OOB DLL's `CalcAllTablesPBN` batch API cannot be used for comparison because the ddss fork changed `MAXNOOFTABLES` from 40 to 1000, making the wrapper struct sizes ABI-incompatible.  The single-deal `CalcDDtablePBN` API uses small, fixed-size structs that are safe across builds.
 
 
 Supported systems
@@ -161,7 +186,24 @@ See `METRICS_TRUTH_TABLE.md` for complete documentation including Python ctypes 
 
 **Legacy: `CalcAllTablesPBN` / `CalcAllTables`**
 
-These still work but require wrapper structs (`ddTableDealsPBN`, `ddTablesRes`, `allParResults`) that are now very large due to internal `MAXNOOFTABLES=1000`.  New code should use `CalcAllTablesPBNx` instead.
+These still work but require wrapper structs (`ddTableDealsPBN`, `ddTablesRes`, `allParResults`) that are larger due to internal `MAXNOOFTABLES=1000`.  New code should use `CalcAllTablesPBNx` instead.
+
+### ABI compatibility warning
+
+The ddss fork increases `MAXNOOFTABLES` from 40 to 1000 (and `MAXNOOFBOARDS` from 200 to 5000).  Because many DDS structs contain fixed-size arrays dimensioned by these constants, **ddss structs are significantly larger than upstream dds structs**:
+
+| Struct | Upstream (dds) | ddss | Reason |
+|--------|---------------|------|--------|
+| `ddTableDealsPBN` | ~16 KB | ~400 KB | `MAXNOOFTABLES * DDS_STRAINS` |
+| `ddTablesRes` | ~16 KB | ~400 KB | `MAXNOOFTABLES * DDS_STRAINS` |
+| `allParResults` | ~12 KB | ~288 KB | `MAXNOOFTABLES` |
+| `boards` | ~26 KB | ~650 KB | `MAXNOOFBOARDS` |
+
+This has two consequences:
+
+1. **Stack overflow risk.**  Code that stack-allocates these structs (e.g. `boards bo;` or `ddTableDealsPBN batch;`) will consume far more stack space than with upstream dds and may crash.  Use heap allocation instead: `auto bo = std::make_unique<boards>();`.
+
+2. **Binary incompatibility with upstream dds.**  The ddss DLL and an upstream dds DLL are **not ABI-compatible** for any API function that passes these large structs (e.g. `CalcAllTablesPBN`, `SolveAllBoards`).  You cannot swap one DLL for the other without recompiling the caller.  The new `CalcAllTablesPBNx` API avoids this problem entirely -- it uses only small, fixed-size per-deal structs that are identical across builds.
 
 ### Thread configuration
 
@@ -182,11 +224,12 @@ The `dtest` program supports DDS solver testing, random deal generation, PBN eva
 | `-n` | `--numthr` | `n` | `0` | Maximum number of threads (`0` = DDS decides). |
 | `-m` | `--memory` | `n` | `0` | Total DDS memory in MB (`0` = DDS decides). |
 | `-r` | `--random-deals` | `n` | `0` | Generate `n` random deals and solve (`0` = disabled). |
-| `-k` | `--reduced-cards` | `n` | `13` | Cards per hand in random-deals mode (`1..13`). |
 | `-e` | `--seed` | `n` | `42` | Random seed for deal generation. |
 | `-g` | `--report-dir` | `p` | `dds_compare_reports` | Output directory for reports (JSON, CSV). |
 | `-p` | `--pbn-source` | `s` | *(none)* | Local PBN file path or URL. Enables PBN evaluation mode. |
 | `-w` | `--html-report` | `f` | *(none)* | Write a readable HTML report file (intended for PBN evaluation mode). |
+| `-o` | `--oob-dll` | `p` | *(auto)* | Path to an OOB (upstream) DDS DLL for cross-verification. Implicitly enables `--verify`. Default: `dds_oob.dll` next to the executable. |
+| `-v` | `--verify` | *(none)* | `off` | Enable OOB cross-verification of DD results. Requires `--oob-dll` or `dds_oob.dll` in the executable's directory. |
 
 Run `dtest` with no arguments to see the built-in help text.
 
@@ -203,8 +246,14 @@ Run `dtest` with no arguments to see the built-in help text.
 # PBN source mode (URL)
 ./dtest --pbn-source https://example.com/deals.pbn --report-dir pbn_reports_url
 
-# Reduced-endgame test (4 cards/hand)
-./dtest --random-deals 1000 --reduced-cards 4 --report-dir endgame_test
+# OOB cross-verification (uses dds_oob.dll next to executable)
+./dtest --random-deals 100 --verify
+
+# OOB cross-verification with explicit DLL path
+./dtest --random-deals 100 --verify --oob-dll /path/to/upstream/dds.dll
+
+# PBN evaluation with OOB verification and HTML report
+./dtest --pbn-source deals.pbn --verify --html-report report.html
 ```
 
 Windows helper scripts (`.bat`)
@@ -221,25 +270,6 @@ These scripts live in the repository root and are intended for Windows CMD use.
   * Runs a PBN smoke test using `build-cmake\Release\dtest.exe`
     with a PBN URL source and HTML output.
   * Writes artifacts to `smoke_probe`.
-
-* `run_all.bat`
-  * Orchestrates the full workflow:
-    1) `rebuild_dtest.bat`
-    2) `smoke_test.bat`
-  * Stops on the first failure and returns non-zero exit code on error.
-
-Recommended usage:
-
-```
-run_all.bat
-```
-
-Or run manually:
-
-```
-rebuild_dtest.bat
-smoke_test.bat
-```
 
 Docs
 ====

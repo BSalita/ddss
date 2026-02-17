@@ -36,7 +36,7 @@ struct optEntry
   unsigned numArgs;
 };
 
-#define DTEST_NUM_OPTIONS 11
+#define DTEST_NUM_OPTIONS 12
 
 const optEntry optList[DTEST_NUM_OPTIONS] =
 {
@@ -46,11 +46,12 @@ const optEntry optList[DTEST_NUM_OPTIONS] =
   {"n", "numthr", 1},
   {"m", "memory", 1},
   {"r", "random-deals", 1},
-  {"k", "reduced-cards", 1},
   {"e", "seed", 1},
   {"g", "report-dir", 1},
   {"p", "pbn-source", 1},
-  {"w", "html-report", 1}
+  {"w", "html-report", 1},
+  {"o", "oob-dll", 1},
+  {"v", "verify", 0}
 };
 
 const vector<string> solverList =
@@ -118,10 +119,6 @@ void Usage(
     "-r, --random-deals n  Generate n random deals and solve.\n" <<
     "                   (Default: 0 meaning disabled)\n" <<
     "\n" <<
-    "-k, --reduced-cards n Cards per hand in random-deals mode.\n" <<
-    "                   Range: 1..13.\n" <<
-    "                   (Default: 13)\n" <<
-    "\n" <<
     "-e, --seed n       Random seed for generated deals.\n" <<
     "                   (Default: 42)\n" <<
     "\n" <<
@@ -133,6 +130,14 @@ void Usage(
     "\n" <<
     "-w, --html-report f Write a readable HTML report file.\n" <<
     "                   Intended for PBN evaluation mode.\n" <<
+    "\n" <<
+    "-o, --oob-dll p    Path to an OOB (upstream) DDS DLL for\n" <<
+    "                   cross-verification of results.\n" <<
+    "                   (Default: dds_oob.dll next to this executable)\n" <<
+    "\n" <<
+    "-v, --verify       Enable OOB cross-verification of DD results.\n" <<
+    "                   Requires --oob-dll or dds_oob.dll in the\n" <<
+    "                   executable's directory.\n" <<
     "\n" <<
     endl;
 }
@@ -196,11 +201,12 @@ void SetDefaults()
   options.numThreads = 0;
   options.memoryMB = 0;
   options.randomDeals = 0;
-  options.reducedCards = 13;
   options.randomSeed = 42;
   options.reportDir = "dds_compare_reports";
   options.pbnSource = "";
   options.htmlReport = "";
+  options.oobDll = "";
+  options.verify = false;
 }
 
 
@@ -219,8 +225,6 @@ void PrintOptions()
     options.memoryMB << " MB\n";
   cout << setw(12) << "deals" << setw(12) <<
     options.randomDeals << "\n";
-  cout << setw(12) << "red-cards" << setw(12) <<
-    options.reducedCards << "\n";
   cout << setw(12) << "seed" << setw(12) <<
     options.randomSeed << "\n";
   cout << setw(12) << "reports" << setw(12) <<
@@ -229,6 +233,10 @@ void PrintOptions()
     (options.pbnSource == "" ? "-" : options.pbnSource) << "\n";
   cout << setw(12) << "html-report" << setw(12) <<
     (options.htmlReport == "" ? "-" : options.htmlReport) << "\n";
+  cout << setw(12) << "oob-dll" << setw(12) <<
+    (options.oobDll == "" ? "-" : options.oobDll) << "\n";
+  cout << setw(12) << "verify" << setw(12) <<
+    (options.verify ? "yes" : "no") << "\n";
   cout << "\n" << right;
 }
 
@@ -367,17 +375,6 @@ void ReadArgs(
         options.randomDeals = m;
         break;
 
-      case 'k':
-        m = static_cast<int>(strtol(optarg, &ctmp, 0));
-        if (m < 1 || m > 13)
-        {
-          cout << "Reduced cards must be in [1, 13]\n\n";
-          nextToken -= 2;
-          errFlag = true;
-        }
-        options.reducedCards = m;
-        break;
-
       case 'e':
         m = static_cast<int>(strtol(optarg, &ctmp, 0));
         options.randomSeed = m;
@@ -395,6 +392,14 @@ void ReadArgs(
         options.htmlReport = string(optarg);
         break;
 
+      case 'o':
+        options.oobDll = string(optarg);
+        break;
+
+      case 'v':
+        options.verify = true;
+        break;
+
       default:
         cout << "Unknown option\n";
         errFlag = true;
@@ -410,4 +415,45 @@ void ReadArgs(
     cout << "Invoke the program without arguments for help" << endl;
     exit(0);
   }
+
+  // Resolve default OOB DLL path if --verify is set and --oob-dll was not.
+  if (options.verify && options.oobDll == "")
+  {
+    // Build the default path: same directory as the executable.
+    string exePath(argv[0]);
+    string dir;
+    const size_t sep = exePath.find_last_of("\\/");
+    if (sep != string::npos)
+      dir = exePath.substr(0, sep + 1);
+
+#ifdef _WIN32
+    const string defaultDll = dir + "dds_oob.dll";
+#else
+    const string defaultDll = dir + "dds_oob.so";
+#endif
+
+    struct stat sb;
+    if (stat(defaultDll.c_str(), &sb) == 0)
+    {
+      options.oobDll = defaultDll;
+      cout << "Using default OOB DLL: " << defaultDll << "\n";
+    }
+    else
+    {
+      cout << "Error: --verify requires an OOB DLL.\n"
+           << "  Provide --oob-dll <path> or place "
+#ifdef _WIN32
+           << "dds_oob.dll"
+#else
+           << "dds_oob.so"
+#endif
+           << " next to the executable.\n"
+           << "  Looked for: " << defaultDll << "\n";
+      exit(1);
+    }
+  }
+
+  // If --oob-dll was given without --verify, enable verify implicitly.
+  if (options.oobDll != "" && !options.verify)
+    options.verify = true;
 }

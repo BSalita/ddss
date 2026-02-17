@@ -8,7 +8,7 @@ Latest DLL issue with this description is available at [http://www.bahnhof.se/wb
 ## Callable functions
 The callable functions are all preceded with `extern "C" __declspec(dllimport) int __stdcall`.  The prototypes are available in `dll.h`, in the include directory.
 
-> **Note (ddss fork):** The ddss fork changes the values of `MAXNOOFTABLES` (40 -> 1000) and `MAXNOOFBOARDS` (200 -> 5000).  All structs sized by these constants are now significantly larger.  See the [Changed Constants](#ChangedConstants) section below.  A new dynamic API function `CalcAllTablesPBNx` is added that avoids these large structs entirely.  See [CalcAllTablesPBNx](#CalcAllTablesPBNx).
+> **Note (ddss fork):** The ddss fork changes the values of `MAXNOOFTABLES` (40 -> 1000) and `MAXNOOFBOARDS` (200 -> 5000).  All structs sized by these constants are now significantly larger (e.g. `ddTableDealsPBN` grows from ~16 KB to ~400 KB).  **Stack-based allocation of these structs (e.g. `boards bo;`) will consume far more stack space than with upstream dds and may cause stack overflow.**  Use heap allocation instead (`auto bo = std::make_unique<boards>();`).  The ddss DLL is **not ABI-compatible** with upstream dds for any API that passes these large structs.  A new dynamic API function `CalcAllTablesPBNx` is added that avoids these large structs entirely and is ABI-safe across builds.  See the [Changed Constants](#ChangedConstants) section and [CalcAllTablesPBNx](#CalcAllTablesPBNx).
 
 [Return codes](#ReturnCodes) are given at the end.
 
@@ -1394,12 +1394,16 @@ The following compile-time constants in `dll.h` have been changed from the upstr
 
 | Constant | Upstream value | ddss fork | Notes |
 |----------|---------------|-----------|-------|
-| `MAXNOOFTABLES` | 40 | 1000 | Internal chunk size for batch APIs |
-| `MAXNOOFBOARDS` | 200 | 5000 (`MAXNOOFTABLES * DDS_STRAINS`) | Was independent; now derived |
+| `MAXNOOFTABLES` | 40 | 1000 | Used internally for chunk size for batch APIs |
+| `MAXNOOFBOARDS` | 200 | 5000 (`MAXNOOFTABLES * DDS_STRAINS`) | Upstream defined this independently; ddss derives it as `MAXNOOFTABLES * 5` so the two constants stay consistent automatically |
 
-**Impact:** Every struct containing arrays sized by these constants is now larger.  Code that stack-allocates these structs (e.g. `boards bo;`) may cause stack overflow and should be changed to heap allocation (`auto bo = std::make_unique<boards>();`).
+**Impact:**
 
-The new `CalcAllTablesPBNx` API avoids this problem entirely by using only small, fixed-size per-deal structs.
+1. **Stack overflow risk.**  Every struct containing arrays sized by these constants is **10-25x larger** than in upstream dds.  Code that stack-allocates these structs (e.g. `boards bo;` or `ddTableDealsPBN batch;`) will likely exceed the default thread stack size and crash.  All such allocations must be changed to heap allocation: `auto bo = std::make_unique<boards>();`.
+
+2. **ABI incompatibility.**  The ddss DLL is **not binary-compatible** with upstream dds for any function that accepts or returns these large structs as parameters (e.g. `CalcAllTablesPBN`, `SolveAllBoards`, `AnalyseAllPlaysPBN`).  A caller compiled against one cannot safely call the other -- the struct layouts differ silently, causing memory corruption.  This applies to all language bindings (C, C++, Python ctypes, C# P/Invoke, etc.).
+
+The new `CalcAllTablesPBNx` API avoids both problems entirely -- it uses only small, fixed-size per-deal structs (`ddTableDealPBN`, `ddTableResults`, `parResults`) whose layouts are identical across upstream dds and ddss.
 
 | Affected struct | Upstream size (approx) | ddss fork size (approx) |
 |----------------|----------------------|------------------------|
@@ -1422,10 +1426,12 @@ These do not change the API contract but affect internal behavior:
 |--------|--------|
 | Scheduler uses `std::vector` instead of fixed arrays | Allows arbitrary batch sizes without recompilation |
 | `CalcAllBoardsN` / `SolveAllBoardsN` zero only `noOfBoards` entries (was `MAXNOOFBOARDS`) | Faster for small batches; identical results |
-| Strain grouping in Scheduler (`MakeGroupsByDeal`) | Same results, faster for `CalcAllTables`-family calls |
+| Strain grouping in Scheduler (`MakeGroupsByDeal`) | Groups same-deal strains in one scheduler bucket for cache locality |
+| Strain comparison in `SameHand` / `FinetuneGroups` | **Correctness fix**: prevents different strains with identical cards from being deduplicated. Caught by OOB cross-verification. |
 | Persistent thread pool (`System.cpp`) | Same results, faster due to thread reuse |
 | Hash-based duplicate detection in `SolveBoard.cpp` | Same results, O(n) instead of O(n^2) |
 | Large structs heap-allocated via `std::make_unique` (static locals in hot paths) | Eliminates stack overflow with large MAXNOOFBOARDS |
+| OOB cross-verification (`dtest --verify`) | Dynamically loads an upstream DDS DLL and compares results cell-by-cell. Used for regression testing. |
 
 <table>
 <thead>
@@ -1510,7 +1516,7 @@ ConvertToDealerTextFormat, ConvertToSidesTextFormat</td>
 <td>Rev&nbsp;X</td><td>2014&#8209;11&#8209;16</td><td>Extended maximum number of tables when calling CalcAllTables.</td>
 </tr>
 <tr>
-<td>dds&#8209;bridge</td><td>2026&#8209;02&#8209;17</td><td>Fork: MAXNOOFTABLES=1000, MAXNOOFBOARDS=5000, new CalcAllTablesPBNx dynamic API, heap allocation for large structs, Scheduler vectorization, strain grouping, persistent thread pool, hash-based duplicate detection, cross-platform CMake build.</td>
+<td>ddss</td><td>2026&#8209;02&#8209;17</td><td>Fork: MAXNOOFTABLES=1000, MAXNOOFBOARDS=5000, new CalcAllTablesPBNx dynamic API, heap allocation for large structs, Scheduler vectorization, strain grouping, persistent thread pool, hash-based duplicate detection, Scheduler strain deduplication fix, OOB cross-verification (--verify/--oob-dll), cross-platform CMake build. ~17x vs OOB-ST, ~7x vs OOB-MT (1000 deals, verified).</td>
 </tr>
 </tbody>
 </table>

@@ -76,6 +76,7 @@ set(DTEST_FILES
   test/dtest.cpp
   test/args.cpp
   test/backend_eval.cpp
+  test/oob_dds.cpp
   test/compare.cpp
   test/loop.cpp
   test/parse.cpp
