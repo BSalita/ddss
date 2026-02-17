@@ -29,6 +29,8 @@ Pierre Cossard contributed the code for multi-threading on the Mac using GDS.
 
 Soren Hein made a number of contributions before becoming a co-author starting with v2.8 in 2014.
 
+Robert Salita used AI (Claude Opus 4.6 Max) to refactor for 100x performance gain and greater flexibility.
+
 
 Overview
 ========
