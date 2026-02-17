@@ -85,6 +85,69 @@ System::System()
 
 System::~System()
 {
+  ShutdownPool();
+}
+
+
+void System::PoolWorker(int thrId)
+{
+  int myGen = 0;
+  while (true)
+  {
+    {
+      unique_lock<mutex> lk(poolMtx);
+      poolStartCV.wait(lk, [this, myGen]{
+        return poolGeneration > myGen || poolShutdown;
+      });
+      if (poolShutdown)
+        return;
+      myGen = poolGeneration;
+    }
+
+    (*fptr)(thrId);
+
+    if (--poolWorkersActive == 0)
+    {
+      lock_guard<mutex> lk(poolMtx);
+      poolDoneCV.notify_one();
+    }
+  }
+}
+
+
+void System::InitPool(int nThreads)
+{
+  ShutdownPool();
+
+  poolSize = nThreads;
+  poolShutdown = false;
+  poolGeneration = 0;
+  poolWorkersActive.store(0);
+
+  poolThreads.reserve(static_cast<unsigned>(nThreads));
+  for (int k = 0; k < nThreads; k++)
+    poolThreads.emplace_back(&System::PoolWorker, this, k);
+}
+
+
+void System::ShutdownPool()
+{
+  if (poolSize == 0)
+    return;
+
+  {
+    lock_guard<mutex> lk(poolMtx);
+    poolShutdown = true;
+  }
+  poolStartCV.notify_all();
+
+  for (auto& t : poolThreads)
+  {
+    if (t.joinable())
+      t.join();
+  }
+  poolThreads.clear();
+  poolSize = 0;
 }
 
 
@@ -247,6 +310,12 @@ int System::RegisterParams(
 
   numThreads = nThreads;
   sysMem_MB = mem_usable_MB;
+
+#ifdef DDS_THREADS_STL
+  if (nThreads > 1 && nThreads != poolSize)
+    InitPool(nThreads);
+#endif
+
   return RETURN_NO_FAULT;
 }
 
@@ -460,22 +529,39 @@ int System::RunThreadsBoost()
 int System::RunThreadsSTL()
 {
 #ifdef DDS_THREADS_STL
-  vector<thread *> threads;
-
   vector<int> uniques;
   vector<int> crossrefs;
   (* CallbackDuplList[runCat])(* bop, uniques, crossrefs);
 
-  const unsigned nu = static_cast<unsigned>(numThreads);
-  threads.resize(nu);
-
-  for (unsigned k = 0; k < nu; k++)
-    threads[k] = new thread(fptr, k);
-
-  for (unsigned k = 0; k < nu; k++)
+  if (poolSize == numThreads && numThreads > 1)
   {
-    threads[k]->join();
-    delete threads[k];
+    // Use persistent thread pool -- bump generation to wake workers
+    {
+      lock_guard<mutex> lk(poolMtx);
+      poolWorkersActive.store(numThreads);
+      ++poolGeneration;
+    }
+    poolStartCV.notify_all();
+
+    {
+      unique_lock<mutex> lk(poolMtx);
+      poolDoneCV.wait(lk, [this]{ return poolWorkersActive.load() == 0; });
+    }
+  }
+  else
+  {
+    // Fallback: create threads per call (single-thread or pool not init)
+    const unsigned nu = static_cast<unsigned>(numThreads);
+    vector<thread *> threads(nu);
+
+    for (unsigned k = 0; k < nu; k++)
+      threads[k] = new thread(fptr, k);
+
+    for (unsigned k = 0; k < nu; k++)
+    {
+      threads[k]->join();
+      delete threads[k];
+    }
   }
 #endif
 

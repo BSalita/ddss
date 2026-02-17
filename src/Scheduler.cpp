@@ -20,6 +20,7 @@ Scheduler::Scheduler()
 {
   numThreads = 0;
   numHands = 0;
+  hashMax = HASH_MAX;
 
   Scheduler::InitHighCards();
 
@@ -92,15 +93,14 @@ Scheduler::~Scheduler()
 
 void Scheduler::Reset()
 {
-  for (int b = 0; b < MAXNOOFBOARDS; b++)
+  for (int b = 0; b < numHands; b++)
     hands[b].next = -1;
 
   numGroups = 0;
   extraGroups = 0;
 
-  // One extra for NT, one extra for splitting collisions.
   for (int strain = 0; strain < DDS_SUITS + 2; strain++)
-    for (int key = 0; key < HASH_MAX; key++)
+    for (int key = 0; key < hashMax; key++)
       list[strain][key].first = -1;
 
   for (unsigned t = 0; t < static_cast<unsigned>(numThreads); t++)
@@ -132,15 +132,52 @@ void Scheduler::RegisterThreads(
 }
 
 
+void Scheduler::EnsureCapacity(int nBoards)
+{
+  numHands = nBoards;
+
+  const int cap = numHands;
+  const int groupCap = 2 * numHands;
+  const int hm = (cap > HASH_MAX) ? cap : HASH_MAX;
+
+  if (static_cast<int>(hands.size()) < cap)
+  {
+    hands.resize(static_cast<size_t>(cap));
+    sortList.resize(static_cast<size_t>(cap));
+  }
+  if (static_cast<int>(group.size()) < groupCap)
+    group.resize(static_cast<size_t>(groupCap));
+  if (hashMax != hm ||
+      list.size() != static_cast<size_t>(DDS_SUITS + 2))
+  {
+    hashMax = hm;
+    list.resize(static_cast<size_t>(DDS_SUITS + 2));
+    for (int i = 0; i < DDS_SUITS + 2; i++)
+      list[i].resize(static_cast<size_t>(hashMax));
+  }
+}
+
+
 void Scheduler::RegisterRun(
   const enum RunMode mode,
   const boards& bds,
   const playTracesBin& pl)
 {
+  Scheduler::EnsureCapacity(bds.noOfBoards);
+
+  // Set depth before Reset/Sort so SortTrace can use it
   for (int b = 0; b < bds.noOfBoards; b++)
     hands[b].depth = pl.plays[b].number;
   
-  Scheduler::RegisterRun(mode, bds);
+  Scheduler::Reset();
+
+  if (mode == DDS_RUN_CALC)
+    Scheduler::MakeGroupsByDeal(bds);
+  else
+    Scheduler::MakeGroups(bds);
+
+  Scheduler::FinetuneGroups();
+  Scheduler::SortHands(mode);
 }
 
 
@@ -148,16 +185,22 @@ void Scheduler::RegisterRun(
   const enum RunMode mode,
   const boards& bds)
 {
+  Scheduler::EnsureCapacity(bds.noOfBoards);
+
   Scheduler::Reset();
 
-  numHands = bds.noOfBoards;
+  if (mode == DDS_RUN_CALC)
+  {
+    // Group by card distribution for cache locality across strains
+    Scheduler::MakeGroupsByDeal(bds);
+  }
+  else
+  {
+    // Original: split by strain and hash key
+    Scheduler::MakeGroups(bds);
+  }
 
-  // First split the hands according to strain and hash key.
-  // This will lead to a few random collisions as well.
-
-  Scheduler::MakeGroups(bds);
-
-  // Then check whether groups with at least two elements are
+  // Check whether groups with at least two elements are
   // homogeneous or whether they need to be split.
 
   Scheduler::FinetuneGroups();
@@ -231,6 +274,67 @@ void Scheduler::MakeGroups(const boards& bds)
       int l = lp->last;
       hands[l].next = b;
 
+      lp->last = b;
+      lp->length++;
+    }
+  }
+}
+
+
+void Scheduler::MakeGroupsByDeal(const boards& bds)
+{
+  // Group boards by card distribution rather than by strain.
+  // All strains of the same deal land in one group for cache locality.
+  // Uses list[0][key] for all groups (strain field in group tracks
+  // original strain of the first board).
+
+  deal const * dl;
+  listType * lp;
+
+  for (int b = 0; b < numHands; b++)
+  {
+    dl = &bds.deals[b];
+
+    unsigned dlXor =
+      dl->remainCards[0][0] ^
+      dl->remainCards[1][1] ^
+      dl->remainCards[2][2] ^
+      dl->remainCards[3][3];
+
+    int key = static_cast<int>(((dlXor >> 2) ^ (dlXor >> 6)) & 0x7f);
+
+    hands[b].spareKey = static_cast<int>(
+                          (dl->remainCards[1][0] << 17) ^
+                          (dl->remainCards[2][1] << 11) ^
+                          (dl->remainCards[3][2] << 5) ^
+                          (dl->remainCards[0][3] >> 2));
+
+    for (int h = 0; h < DDS_HANDS; h++)
+      for (int s = 0; s < DDS_SUITS; s++)
+        hands[b].remainCards[h][s] = dl->remainCards[h][s];
+
+    hands[b].NTflag = (dl->trump == 4 ? 1 : 0);
+    hands[b].first = dl->first;
+    hands[b].strain = dl->trump;
+    hands[b].fanout = Scheduler::Fanout(* dl);
+
+    // Use strain=0 bucket for all boards (strain-agnostic grouping)
+    lp = &list[0][key];
+
+    if (lp->first == -1)
+    {
+      lp->first = b;
+      lp->last = b;
+      lp->length = 1;
+
+      group[numGroups].strain = 0;
+      group[numGroups].hash = key;
+      numGroups++;
+    }
+    else
+    {
+      int l = lp->last;
+      hands[l].next = b;
       lp->last = b;
       lp->length++;
     }

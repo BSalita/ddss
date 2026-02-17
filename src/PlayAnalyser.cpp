@@ -7,6 +7,8 @@
    See LICENSE and README.
 */
 
+#include <memory>
+
 #include "PlayAnalyser.h"
 #include "SolverIF.h"
 #include "System.h"
@@ -353,8 +355,10 @@ int STDCALL AnalyseAllPlaysPBN(
   solvedPlays * solvedp,
   int chunkSize)
 {
-  boards bd;
-  playTracesBin pl;
+  auto pbd = std::make_unique<boards>();
+  auto ppl = std::make_unique<playTracesBin>();
+  boards& bd = *pbd;
+  playTracesBin& pl = *ppl;
 
   bd.noOfBoards = bopPBN->noOfBoards;
   if (bd.noOfBoards > MAXNOOFBOARDS)

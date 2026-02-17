@@ -8,6 +8,9 @@
 */
 
 
+#include <memory>
+#include <unordered_map>
+
 #include "SolverIF.h"
 #include "SolveBoard.h"
 #include "System.h"
@@ -123,7 +126,7 @@ int SolveAllBoardsN(
   scheduler.RegisterRun(DDS_RUN_SOLVE, bds);
   sysdep.RegisterRun(DDS_RUN_SOLVE, bds);
 
-  for (int k = 0; k < MAXNOOFBOARDS; k++)
+  for (int k = 0; k < bds.noOfBoards; k++)
     solved.solvedBoard[k].cards = 0;
 
   START_BLOCK_TIMER;
@@ -175,31 +178,31 @@ int STDCALL SolveAllBoards(
   boardsPBN * bop, 
   solvedBoards * solvedp)
 {
-  boards bo;
-  bo.noOfBoards = bop->noOfBoards;
-  if (bo.noOfBoards > MAXNOOFBOARDS)
+  static auto bo = std::make_unique<boards>();
+  bo->noOfBoards = bop->noOfBoards;
+  if (bo->noOfBoards > MAXNOOFBOARDS)
     return RETURN_TOO_MANY_BOARDS;
 
   for (int k = 0; k < bop->noOfBoards; k++)
   {
-    bo.mode[k] = bop->mode[k];
-    bo.solutions[k] = bop->solutions[k];
-    bo.target[k] = bop->target[k];
-    bo.deals[k].first = bop->deals[k].first;
-    bo.deals[k].trump = bop->deals[k].trump;
+    bo->mode[k] = bop->mode[k];
+    bo->solutions[k] = bop->solutions[k];
+    bo->target[k] = bop->target[k];
+    bo->deals[k].first = bop->deals[k].first;
+    bo->deals[k].trump = bop->deals[k].trump;
 
     for (int i = 0; i <= 2; i++)
     {
-      bo.deals[k].currentTrickSuit[i] = bop->deals[k].currentTrickSuit[i];
-      bo.deals[k].currentTrickRank[i] = bop->deals[k].currentTrickRank[i];
+      bo->deals[k].currentTrickSuit[i] = bop->deals[k].currentTrickSuit[i];
+      bo->deals[k].currentTrickRank[i] = bop->deals[k].currentTrickRank[i];
     }
 
-    if (ConvertFromPBN(bop->deals[k].remainCards, bo.deals[k].remainCards) 
+    if (ConvertFromPBN(bop->deals[k].remainCards, bo->deals[k].remainCards) 
         != 1)
       return RETURN_PBN_FAULT;
   }
 
-  int res = SolveAllBoardsN(bo, * solvedp);
+  int res = SolveAllBoardsN(*bo, * solvedp);
   return res;
 }
 
@@ -251,6 +254,34 @@ int STDCALL SolveAllChunksBin(
 }
 
 
+static uint64_t BoardHash(const boards& bds, unsigned idx)
+{
+  // FNV-1a 64-bit hash of all fields used in SameBoard comparison.
+  uint64_t h = 14695981039346656037ULL;
+  const uint64_t prime = 1099511628211ULL;
+
+  auto mix = [&](uint64_t v) { h ^= v; h *= prime; };
+
+  const deal& d = bds.deals[idx];
+  for (int hand = 0; hand < DDS_HANDS; hand++)
+    for (int s = 0; s < DDS_SUITS; s++)
+      mix(d.remainCards[hand][s]);
+
+  mix(static_cast<uint64_t>(d.trump));
+  mix(static_cast<uint64_t>(d.first));
+  mix(static_cast<uint64_t>(bds.mode[idx]));
+  mix(static_cast<uint64_t>(bds.solutions[idx]));
+  mix(static_cast<uint64_t>(bds.target[idx]));
+
+  for (int k = 0; k < 3; k++)
+  {
+    mix(static_cast<uint64_t>(d.currentTrickSuit[k]));
+    mix(static_cast<uint64_t>(d.currentTrickRank[k]));
+  }
+  return h;
+}
+
+
 void DetectSolveDuplicates(
   const boards& bds,
   vector<int>& uniques,
@@ -264,17 +295,36 @@ void DetectSolveDuplicates(
   for (unsigned i = 0; i < nu; i++)
     crossrefs[i] = -1;
 
+  // Hash-based O(n) duplicate detection with collision fallback
+  unordered_map<uint64_t, vector<unsigned>> buckets;
+  buckets.reserve(nu);
+
   for (unsigned i = 0; i < nu; i++)
   {
-    if (crossrefs[i] != -1)
-      continue;
-
-    uniques.push_back(static_cast<int>(i));
-
-    for (unsigned index = i+1; index < nu; index++)
+    uint64_t h = BoardHash(bds, i);
+    auto it = buckets.find(h);
+    if (it != buckets.end())
     {
-      if (SameBoard(bds, i, index))
-        crossrefs[index] = static_cast<int>(i);
+      bool found = false;
+      for (unsigned prev : it->second)
+      {
+        if (SameBoard(bds, prev, i))
+        {
+          crossrefs[i] = static_cast<int>(prev);
+          found = true;
+          break;
+        }
+      }
+      if (!found)
+      {
+        uniques.push_back(static_cast<int>(i));
+        it->second.push_back(i);
+      }
+    }
+    else
+    {
+      uniques.push_back(static_cast<int>(i));
+      buckets[h] = {i};
     }
   }
 }

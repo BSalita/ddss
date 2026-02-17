@@ -4,9 +4,11 @@ Rev X, 2014-11-16
 
 Latest DLL issue with this description is available at [http://www.bahnhof.se/wb758135/](http://www.bahnhof.se/wb758135/)
 
-# Description of the DLL functions supported in Double Dummy Problem Solver 2.8.2
+# Description of the DLL functions supported in Double Dummy Problem Solver 2.9.0 (dds-bridge fork)
 ## Callable functions
 The callable functions are all preceded with `extern "C" __declspec(dllimport) int __stdcall`.  The prototypes are available in `dll.h`, in the include directory.
+
+> **Note (dds-bridge fork):** This fork changes the values of `MAXNOOFTABLES` (40 -> 1000) and `MAXNOOFBOARDS` (200 -> 5000).  All structs sized by these constants are now significantly larger.  See the [Changed Constants](#ChangedConstants) section below.  A new dynamic API function `CalcAllTablesPBNx` is added that avoids these large structs entirely.  See [CalcAllTablesPBNx](#CalcAllTablesPBNx).
 
 [Return codes](#ReturnCodes) are given at the end.
 
@@ -139,6 +141,25 @@ The functions `AnalysePlayBin`, `AnalysePlayPBN`, `AnalyseAllPlaysBin` and `Anal
 </tr>
 <tr>
 <td><code>struct&nbsp;<a href="#allParResults">allParResults</a>&nbsp;*pres</code></td>
+</tr>
+<tr><td colspan="4">&nbsp;</td></tr>
+<tr>
+<td rowspan="6"><code><a href="#CalcAllTablesPBNx">CalcAllTablesPBNx</a></code></td><td><code>int&nbsp;numDeals</code></td><td rowspan="6">PBN</td><td rowspan="6"><strong>(New in this fork.)</strong> Dynamic-size batch API. Solves any number of deals using plain arrays. No wrapper structs, no compile-time size limits. Recommended for new code and language interop.</td>
+</tr>
+<tr>
+<td><code>struct&nbsp;<a href="#ddTableDealPBN">ddTableDealPBN</a>&nbsp;dealCards[]</code></td>
+</tr>
+<tr>
+<td><code>int&nbsp;mode</code></td>
+</tr>
+<tr>
+<td><code>int&nbsp;trumpFilter[5]</code></td>
+</tr>
+<tr>
+<td><code>struct&nbsp;<a href="#ddTableResults">ddTableResults</a>&nbsp;results[]</code></td>
+</tr>
+<tr>
+<td><code>struct&nbsp;<a href="#parResults">parResults</a>&nbsp;par[]</code></td>
 </tr>
 <tr><td colspan="4">&nbsp;</td></tr>
 <tr>
@@ -948,6 +969,63 @@ The maximum number of DD tables in a CalcAllTables call depends on the number of
 </tbody>
 </table>
 
+> **Note (this fork):** With `MAXNOOFTABLES=1000`, the maximum number of DD tables per `CalcAllTables`/`CalcAllTablesPBN` call is now much larger (up to 1000 for 5 strains, up to 5000 boards).  However, for new code, `CalcAllTablesPBNx` (below) is preferred as it has no fixed limit.
+
+<a name="CalcAllTablesPBNx"></a>
+
+### CalcAllTablesPBNx (new in dds-bridge fork)
+
+```c
+int CalcAllTablesPBNx(
+  int numDeals,
+  struct ddTableDealPBN dealCards[],
+  int mode,
+  int trumpFilter[5],
+  struct ddTableResults results[],
+  struct parResults par[]);
+```
+
+**Added in this fork.** Dynamic-size batch API that solves any number of deals without compile-time limits.
+
+The caller passes plain arrays of any length.  The library handles internal chunking (currently 1000 deals per batch), memory allocation, and thread distribution automatically.
+
+**Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `numDeals` | Number of deals to solve (any positive integer). |
+| `dealCards[]` | Caller-allocated array of `numDeals` `ddTableDealPBN` structs (PBN card strings). |
+| `mode` | Par-score mode: -1 = no par, 0 = None, 1 = Both, 2 = NS only, 3 = EW only. |
+| `trumpFilter[5]` | Which strains to skip (0 = solve, 1 = skip), in Suit encoding order. |
+| `results[]` | Caller-allocated array of `numDeals` `ddTableResults` structs (output). |
+| `par[]` | Caller-allocated array of `numDeals` `parResults` structs (output). May be NULL if `mode == -1`. |
+
+**Returns:** `RETURN_NO_FAULT` (1) on success, negative error code on failure.
+
+**Key properties:**
+- No compile-time size limit on `numDeals`.
+- Uses only small, fixed-size per-deal structs (`ddTableDealPBN`, `ddTableResults`, `parResults`) that are independent of `MAXNOOFTABLES`.
+- Recommended for language interop (Python ctypes, C#, Java, etc.) because the structs are trivial to map.
+- Thread-safe caveat: NOT safe to call from multiple threads simultaneously (uses global state internally).
+
+**Example (C):**
+
+```c
+int n = 5000;
+ddTableDealPBN *deals = malloc(n * sizeof(ddTableDealPBN));
+ddTableResults *results = malloc(n * sizeof(ddTableResults));
+int trumpFilter[5] = {0, 0, 0, 0, 0};
+
+// ... fill deals[0..n-1].cards with PBN strings ...
+
+int ret = CalcAllTablesPBNx(n, deals, -1, trumpFilter, results, NULL);
+if (ret != RETURN_NO_FAULT) { /* handle error */ }
+
+// results[i].resTable[strain][hand] = tricks
+```
+
+See `METRICS_TRUTH_TABLE.md` for Python ctypes examples and language interop guidance.
+
 <table>
 <thead>
 <tr>
@@ -1309,6 +1387,46 @@ Invalid suit or rank supplied. (c) A played card is not held by the right player
 </tbody>
 </table>
 
+<a name="ChangedConstants"></a>
+## Changed Constants (dds-bridge fork)
+
+The following compile-time constants in `dll.h` have been changed from the upstream DDS 2.9.0 values:
+
+| Constant | Upstream value | This fork | Notes |
+|----------|---------------|-----------|-------|
+| `MAXNOOFTABLES` | 40 | 1000 | Internal chunk size for batch APIs |
+| `MAXNOOFBOARDS` | 200 | 5000 (`MAXNOOFTABLES * DDS_STRAINS`) | Was independent; now derived |
+
+**Impact:** Every struct containing arrays sized by these constants is now larger.  Code that stack-allocates these structs (e.g. `boards bo;`) may cause stack overflow and should be changed to heap allocation (`auto bo = std::make_unique<boards>();`).
+
+The new `CalcAllTablesPBNx` API avoids this problem entirely by using only small, fixed-size per-deal structs.
+
+| Affected struct | Upstream size (approx) | This fork size (approx) |
+|----------------|----------------------|------------------------|
+| `boards` | ~18 KB | ~460 KB |
+| `boardsPBN` | ~22 KB | ~550 KB |
+| `solvedBoards` | ~56 KB | ~1.4 MB |
+| `ddTableDeals` | ~12 KB | ~320 KB |
+| `ddTableDealsPBN` | ~16 KB | ~400 KB |
+| `ddTablesRes` | ~16 KB | ~400 KB |
+| `allParResults` | ~12 KB | ~288 KB |
+| `playTracesBin` | ~84 KB | ~2.1 MB |
+| `playTracesPBN` | ~22 KB | ~540 KB |
+| `solvedPlays` | ~43 KB | ~1.1 MB |
+
+## Internal Behavioral Changes (dds-bridge fork)
+
+These do not change the API contract but affect internal behavior:
+
+| Change | Effect |
+|--------|--------|
+| Scheduler uses `std::vector` instead of fixed arrays | Allows arbitrary batch sizes without recompilation |
+| `CalcAllBoardsN` / `SolveAllBoardsN` zero only `noOfBoards` entries (was `MAXNOOFBOARDS`) | Faster for small batches; identical results |
+| Strain grouping in Scheduler (`MakeGroupsByDeal`) | Same results, faster for `CalcAllTables`-family calls |
+| Persistent thread pool (`System.cpp`) | Same results, faster due to thread reuse |
+| Hash-based duplicate detection in `SolveBoard.cpp` | Same results, O(n) instead of O(n^2) |
+| Large structs heap-allocated via `std::make_unique` (static locals in hot paths) | Eliminates stack overflow with large MAXNOOFBOARDS |
+
 <table>
 <thead>
 <tr>
@@ -1390,6 +1508,9 @@ ConvertToDealerTextFormat, ConvertToSidesTextFormat</td>
 </tr>
 <tr>
 <td>Rev&nbsp;X</td><td>2014&#8209;11&#8209;16</td><td>Extended maximum number of tables when calling CalcAllTables.</td>
+</tr>
+<tr>
+<td>dds&#8209;bridge</td><td>2026&#8209;02&#8209;17</td><td>Fork: MAXNOOFTABLES=1000, MAXNOOFBOARDS=5000, new CalcAllTablesPBNx dynamic API, heap allocation for large structs, Scheduler vectorization, strain grouping, persistent thread pool, hash-based duplicate detection, cross-platform CMake build.</td>
 </tr>
 </tbody>
 </table>

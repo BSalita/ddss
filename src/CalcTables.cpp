@@ -8,6 +8,9 @@
 */
 
 
+#include <memory>
+#include <algorithm>
+
 #include "CalcTables.h"
 #include "SolverIF.h"
 #include "SolveBoard.h"
@@ -139,7 +142,7 @@ int CalcAllBoardsN(
   scheduler.RegisterRun(DDS_RUN_CALC, * bop);
   sysdep.RegisterRun(DDS_RUN_CALC, * bop);
 
-  for (int k = 0; k < MAXNOOFBOARDS; k++)
+  for (int k = 0; k < bop->noOfBoards; k++)
     solvedp->solvedBoard[k].cards = 0;
 
   START_BLOCK_TIMER;
@@ -168,8 +171,8 @@ int STDCALL CalcDDtable(
   ddTableResults * tablep)
 {
   deal dl;
-  boards bo;
-  solvedBoards solved;
+  static auto bo = std::make_unique<boards>();
+  static auto solved = std::make_unique<solvedBoards>();
 
   for (int h = 0; h < DDS_HANDS; h++)
     for (int s = 0; s < DDS_SUITS; s++)
@@ -182,32 +185,32 @@ int STDCALL CalcDDtable(
   }
 
   int ind = 0;
-  bo.noOfBoards = DDS_STRAINS;
+  bo->noOfBoards = DDS_STRAINS;
 
   for (int tr = DDS_STRAINS-1; tr >= 0; tr--)
   {
     dl.trump = tr;
-    bo.deals[ind] = dl;
-    bo.target[ind] = -1;
-    bo.solutions[ind] = 1;
-    bo.mode[ind] = 1;
+    bo->deals[ind] = dl;
+    bo->target[ind] = -1;
+    bo->solutions[ind] = 1;
+    bo->mode[ind] = 1;
     ind++;
   }
 
-  int res = CalcAllBoardsN(&bo, &solved);
+  int res = CalcAllBoardsN(bo.get(), solved.get());
   if (res != 1)
     return res;
 
   for (int index = 0; index < DDS_STRAINS; index++)
   {
-    int strain = bo.deals[index].trump;
+    int strain = bo->deals[index].trump;
 
     // SH: I'm making a terrible use of the fut structure here.
 
     for (int first = 0; first < DDS_HANDS; first++)
     {
       tablep->resTable[strain][ rho[first] ] =
-        13 - solved.solvedBoard[index].score[first];
+        13 - solved->solvedBoard[index].score[first];
     }
   }
   return RETURN_NO_FAULT;
@@ -227,8 +230,8 @@ int STDCALL CalcAllTables(
      mode = 3: par calculation, vulnerability EW
          mode = -1: no par calculation */
 
-  boards bo;
-  solvedBoards solved;
+  static auto bo = std::make_unique<boards>();
+  static auto solved = std::make_unique<solvedBoards>();
   int count = 0;
   bool okey = false;
 
@@ -260,46 +263,46 @@ int STDCALL CalcAllTables(
 
       for (int h = 0; h < DDS_HANDS; h++)
         for (int s = 0; s < DDS_SUITS; s++)
-          bo.deals[ind].remainCards[h][s] =
+          bo->deals[ind].remainCards[h][s] =
             dealsp->deals[m].cards[h][s];
 
-      bo.deals[ind].trump = tr;
+      bo->deals[ind].trump = tr;
 
       for (int k = 0; k <= 2; k++)
       {
-        bo.deals[ind].currentTrickRank[k] = 0;
-        bo.deals[ind].currentTrickSuit[k] = 0;
+        bo->deals[ind].currentTrickRank[k] = 0;
+        bo->deals[ind].currentTrickSuit[k] = 0;
       }
 
-      bo.target[ind] = -1;
-      bo.solutions[ind] = 1;
-      bo.mode[ind] = 1;
+      bo->target[ind] = -1;
+      bo->solutions[ind] = 1;
+      bo->mode[ind] = 1;
       lastIndex = ind;
       ind++;
     }
   }
 
-  bo.noOfBoards = lastIndex + 1;
+  bo->noOfBoards = lastIndex + 1;
 
-  int res = CalcAllBoardsN(&bo, &solved);
+  int res = CalcAllBoardsN(bo.get(), solved.get());
   if (res != 1)
     return res;
 
-  resp->noOfBoards += 4 * solved.noOfBoards;
+  resp->noOfBoards += 4 * solved->noOfBoards;
 
   for (int m = 0; m < dealsp->noOfTables; m++)
   {
     for (int strainIndex = 0; strainIndex < count; strainIndex++)
     {
       int index = m * count + strainIndex;
-      int strain = bo.deals[index].trump;
+      int strain = bo->deals[index].trump;
 
       // SH: I'm making a terrible use of the fut structure here.
 
       for (int first = 0; first < DDS_HANDS; first++)
       {
         resp->results[m].resTable[strain][ rho[first] ] =
-          13 - solved.solvedBoard[index].score[first];
+          13 - solved->solvedBoard[index].score[first];
       }
     }
   }
@@ -326,14 +329,14 @@ int STDCALL CalcAllTablesPBN(
   ddTablesRes * resp,
   allParResults * presp)
 {
-  ddTableDeals dls;
+  static auto dls = std::make_unique<ddTableDeals>();
   for (int k = 0; k < dealsp->noOfTables; k++)
-    if (ConvertFromPBN(dealsp->deals[k].cards, dls.deals[k].cards) != 1)
+    if (ConvertFromPBN(dealsp->deals[k].cards, dls->deals[k].cards) != 1)
       return RETURN_PBN_FAULT;
 
-  dls.noOfTables = dealsp->noOfTables;
+  dls->noOfTables = dealsp->noOfTables;
 
-  int res = CalcAllTables(&dls, mode, trumpFilter, resp, presp);
+  int res = CalcAllTables(dls.get(), mode, trumpFilter, resp, presp);
   return res;
 }
 
@@ -359,5 +362,109 @@ void DetectCalcDuplicates(
   // Could save a little bit of time with a dedicated checker that
   // only looks at the cards.
   return DetectSolveDuplicates(bds, uniques, crossrefs);
+}
+
+
+int STDCALL CalcAllTablesPBNx(
+  int numDeals,
+  ddTableDealPBN dealCards[],
+  int mode,
+  int trumpFilter[5],
+  ddTableResults results[],
+  parResults par[])
+{
+  if (numDeals < 1)
+    return RETURN_UNKNOWN_FAULT;
+
+  int activeStrains = 0;
+  for (int k = 0; k < DDS_STRAINS; k++)
+    if (!trumpFilter[k])
+      activeStrains++;
+  if (activeStrains == 0)
+    return RETURN_NO_SUIT;
+
+  // Internal chunk capacity: how many deals fit in one CalcAllBoardsN
+  // call given that each deal expands to activeStrains boards.
+  const int chunkDeals = MAXNOOFBOARDS / activeStrains;
+  if (chunkDeals < 1)
+    return RETURN_TOO_MANY_BOARDS;
+
+  // Allocated once on first call, reused on all subsequent calls.
+  // Safe: CalcAllBoardsN uses global state so the API is already
+  // single-caller; no concurrent access to these buffers is possible.
+  static auto bo     = std::make_unique<boards>();
+  static auto solved = std::make_unique<solvedBoards>();
+
+  int dealt = 0;
+  while (dealt < numDeals)
+  {
+    const int batchDeals = (std::min)(numDeals - dealt, chunkDeals);
+
+    // Convert PBN cards and expand strains into boards
+    int ind = 0;
+    for (int m = 0; m < batchDeals; m++)
+    {
+      ddTableDeal tableDeal;
+      if (ConvertFromPBN(dealCards[dealt + m].cards,
+                         tableDeal.cards) != 1)
+        return RETURN_PBN_FAULT;
+
+      for (int tr = DDS_STRAINS - 1; tr >= 0; tr--)
+      {
+        if (trumpFilter[tr])
+          continue;
+
+        for (int h = 0; h < DDS_HANDS; h++)
+          for (int s = 0; s < DDS_SUITS; s++)
+            bo->deals[ind].remainCards[h][s] = tableDeal.cards[h][s];
+
+        bo->deals[ind].trump = tr;
+        for (int k = 0; k <= 2; k++)
+        {
+          bo->deals[ind].currentTrickRank[k] = 0;
+          bo->deals[ind].currentTrickSuit[k] = 0;
+        }
+        bo->target[ind]    = -1;
+        bo->solutions[ind] = 1;
+        bo->mode[ind]      = 1;
+        ind++;
+      }
+    }
+
+    bo->noOfBoards = ind;
+
+    int res = CalcAllBoardsN(bo.get(), solved.get());
+    if (res != RETURN_NO_FAULT)
+      return res;
+
+    // Scatter results back to caller arrays
+    for (int m = 0; m < batchDeals; m++)
+    {
+      for (int si = 0; si < activeStrains; si++)
+      {
+        int boardIdx = m * activeStrains + si;
+        int strain   = bo->deals[boardIdx].trump;
+
+        for (int first = 0; first < DDS_HANDS; first++)
+          results[dealt + m].resTable[strain][rho[first]] =
+            13 - solved->solvedBoard[boardIdx].score[first];
+      }
+    }
+
+    // Par calculation if requested
+    if (mode > -1 && mode < 4 && activeStrains == 5 && par != nullptr)
+    {
+      for (int m = 0; m < batchDeals; m++)
+      {
+        int res2 = Par(&results[dealt + m], &par[dealt + m], mode);
+        if (res2 != RETURN_NO_FAULT)
+          return res2;
+      }
+    }
+
+    dealt += batchDeals;
+  }
+
+  return RETURN_NO_FAULT;
 }
 

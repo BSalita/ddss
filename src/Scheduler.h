@@ -11,6 +11,7 @@
 #define DDS_SCHEDULER_H
 
 #include <atomic>
+#include <vector>
 
 #include "dds.h"
 #include "TimeStatList.h"
@@ -75,6 +76,7 @@ class Scheduler
       int NTflag;
       int first;
       int strain;
+      int dealIndex;
       int repeatNo;
       int depth;
       int strength;
@@ -84,17 +86,18 @@ class Scheduler
       int time;
     };
 
-    handType hands[MAXNOOFBOARDS];
+    vector<handType> hands;
 
-    groupType group[MAXNOOFBOARDS];
+    vector<groupType> group;
     int numGroups;
     int extraGroups;
 
     atomic<int> currGroup;
 
-    listType list[DDS_SUITS + 2][HASH_MAX];
+    vector<vector<listType>> list;
+    int hashMax;
 
-    sortType sortList[MAXNOOFBOARDS];
+    vector<sortType> sortList;
     int sortLen;
 
     vector<int> threadGroup;
@@ -118,7 +121,10 @@ class Scheduler
     vector<Timer> timersThread;
     Timer timerBlock;
 
+    void EnsureCapacity(int nBoards);
+
     void MakeGroups(const boards& bds);
+    void MakeGroupsByDeal(const boards& bds);
 
     void FinetuneGroups();
 

@@ -1,5 +1,6 @@
 DTEST_SOURCE_FILES 	=	\
         args.cpp                \
+        backend_eval.cpp        \
         compare.cpp             \
         loop.cpp                \
         parse.cpp               \

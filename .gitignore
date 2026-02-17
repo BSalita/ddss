@@ -18,3 +18,27 @@ test/itest
 *.exp
 *.lib
 *.res
+
+# Build directories
+build-*/
+
+# Test/benchmark output
+test/correctness_*/
+test/dds_compare_reports*/
+test/pbn_reports_*/
+test/pbn_smoke_reports/
+test/smoke_probe*/
+test/probe_check/
+dds_compare_reports_*/
+pbn_reports_html_auto/
+bench_hybrid_*/
+smoke_probe*/
+probe_check/
+probe_check_path/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# IDE / workspace
+*.code-workspace

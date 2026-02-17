@@ -1,0 +1,1 @@
+build-cmake\Release\dtest.exe --pbn-source https://raw.githubusercontent.com/ContractBridge/pbn-files/refs/heads/master/1997-Cavendish_Invitational_Pairs_Tournament/ROUND1.PBN --backend compare --compare-target all --report-dir smoke_probe --html-report smoke_probe\report.html

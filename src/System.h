@@ -16,6 +16,10 @@
 
 #include <string>
 #include <vector>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 
 #include "dds.h"
 
@@ -54,6 +58,20 @@ class System
     fptrType fptr;
 
     boards const * bop;
+
+    // Persistent thread pool for STL threading
+    vector<thread> poolThreads;
+    mutex poolMtx;
+    condition_variable poolStartCV;
+    condition_variable poolDoneCV;
+    atomic<int> poolWorkersActive{0};
+    bool poolShutdown{false};
+    int poolGeneration{0};
+    int poolSize{0};
+
+    void PoolWorker(int thrId);
+    void InitPool(int nThreads);
+    void ShutdownPool();
 
     int RunThreadsBasic();
     int RunThreadsBoost();

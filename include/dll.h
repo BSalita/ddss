@@ -35,9 +35,14 @@
 #define DDS_STRAINS 5
 
 
-#define MAXNOOFBOARDS 200
-
-#define MAXNOOFTABLES 40
+/* Internal chunk sizes for batch APIs.  CalcAllTablesPBNx handles
+   any number of deals by chunking through CalcAllBoardsN in slices
+   of up to MAXNOOFBOARDS boards (= MAXNOOFTABLES * DDS_STRAINS).
+   Larger values improve throughput via better strain-grouping /
+   cache-locality up to ~1000 tables.  These are *not* exposed to
+   callers of CalcAllTablesPBNx. */
+#define MAXNOOFTABLES 1000
+#define MAXNOOFBOARDS (MAXNOOFTABLES * DDS_STRAINS)
 
 
 // Error codes. See interface document for more detail.
@@ -434,6 +439,25 @@ EXTERN_C DLLEXPORT int STDCALL CalcAllTablesPBN(
   int trumpFilter[DDS_STRAINS],
   struct ddTablesRes * resp,
   struct allParResults * presp);
+
+/* Dynamic-size API: caller passes plain arrays of any length.
+   The library handles internal chunking -- no compile-time size
+   limits are exposed to the caller.
+
+   numDeals   Number of deals to solve (1..unlimited).
+   dealCards  Array of numDeals PBN card strings.
+   mode       Par-score mode (-1 = no par, 0-3 = vulnerability).
+   trumpFilter[5]  Which strains to skip (0 = solve, 1 = skip).
+   results    Caller-allocated array of numDeals ddTableResults.
+   par        Caller-allocated array of numDeals parResults
+              (may be NULL if mode == -1). */
+EXTERN_C DLLEXPORT int STDCALL CalcAllTablesPBNx(
+  int numDeals,
+  struct ddTableDealPBN dealCards[],
+  int mode,
+  int trumpFilter[DDS_STRAINS],
+  struct ddTableResults results[],
+  struct parResults par[]);
 
 EXTERN_C DLLEXPORT int STDCALL SolveAllBoards(
   struct boardsPBN * bop,

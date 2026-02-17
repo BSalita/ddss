@@ -11,6 +11,7 @@
 #include <iostream>
 #include <iomanip>
 #include <vector>
+#include <memory>
 
 #include "../include/dll.h"
 #include "../include/portab.h"
@@ -22,6 +23,7 @@
 #include "compare.h"
 #include "print.h"
 #include "cst.h"
+#include "backend_eval.h"
 
 using namespace std;
 
@@ -77,6 +79,22 @@ int realMain(int argc, char * argv[])
   set_constants();
   main_identify();
 
+  if (options.randomDeals > 0)
+  {
+    const bool ok = RunBackendEvaluation(options);
+    if (! ok)
+      return 1;
+    return 0;
+  }
+
+  if (options.pbnSource != "")
+  {
+    const bool ok = RunPbnEvaluation(options);
+    if (! ok)
+      return 1;
+    return 0;
+  }
+
   int number = 0;
   int * dealer_list = nullptr;
   int * vul_list = nullptr;
@@ -104,26 +122,26 @@ int realMain(int argc, char * argv[])
   timer.reset();
   timer.setname("Hand stats");
 
-  boardsPBN bop;
-  solvedBoards solvedbdp;
-  ddTableDealsPBN dealsp;
-  ddTablesRes resp;
-  allParResults parp;
-  playTracesPBN playsp;
-  solvedPlays solvedplp;
+  auto bop       = std::make_unique<boardsPBN>();
+  auto solvedbdp = std::make_unique<solvedBoards>();
+  auto dealsp    = std::make_unique<ddTableDealsPBN>();
+  auto resp      = std::make_unique<ddTablesRes>();
+  auto parp      = std::make_unique<allParResults>();
+  auto playsp    = std::make_unique<playTracesPBN>();
+  auto solvedplp = std::make_unique<solvedPlays>();
 
   if (options.solver == DTEST_SOLVER_SOLVE)
   {
-    loop_solve(&bop, &solvedbdp, deal_list, fut_list, number, stepsize);
+    loop_solve(bop.get(), solvedbdp.get(), deal_list, fut_list, number, stepsize);
   }
   else if (options.solver == DTEST_SOLVER_CALC)
   {
-    loop_calc(&dealsp, &resp, &parp, deal_list, table_list, 
+    loop_calc(dealsp.get(), resp.get(), parp.get(), deal_list, table_list, 
       number, stepsize);
   }
   else if (options.solver == DTEST_SOLVER_PLAY)
   {
-    loop_play(&bop, &playsp, &solvedplp, deal_list, play_list, trace_list, 
+    loop_play(bop.get(), playsp.get(), solvedplp.get(), deal_list, play_list, trace_list, 
       number, stepsize);
   }
   else if (options.solver == DTEST_SOLVER_PAR)

@@ -40,6 +40,22 @@ enum Threading
   DTEST_THREADING_SIZE = 10
 };
 
+enum DdsBackend
+{
+  DTEST_BACKEND_CPU = 0,
+  DTEST_BACKEND_COMPARE = 1,
+  DTEST_BACKEND_SIZE = 2
+};
+
+enum CompareTarget
+{
+  DTEST_COMPARE_FAST = 0,
+  DTEST_COMPARE_HYBRID = 1,
+  DTEST_COMPARE_EXACT = 2,
+  DTEST_COMPARE_ALL = 3,
+  DTEST_COMPARE_SIZE = 4
+};
+
 struct OptionsType
 {
   string fname;
@@ -47,6 +63,15 @@ struct OptionsType
   Threading threading;
   int numThreads;
   int memoryMB;
+  DdsBackend backend;
+  CompareTarget compareTarget;
+  int randomDeals;
+  int reducedCards;
+  int randomSeed;
+  double confidenceThreshold;
+  string reportDir;
+  string pbnSource;
+  string htmlReport;
 };
 
 #endif
