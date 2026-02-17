@@ -4,11 +4,11 @@ Rev X, 2014-11-16
 
 Latest DLL issue with this description is available at [http://www.bahnhof.se/wb758135/](http://www.bahnhof.se/wb758135/)
 
-# Description of the DLL functions supported in Double Dummy Problem Solver 2.9.0 (dds-bridge fork)
+# Description of the DLL functions supported in Double Dummy Problem Solver 2.9.0 (ddss fork)
 ## Callable functions
 The callable functions are all preceded with `extern "C" __declspec(dllimport) int __stdcall`.  The prototypes are available in `dll.h`, in the include directory.
 
-> **Note (dds-bridge fork):** This fork changes the values of `MAXNOOFTABLES` (40 -> 1000) and `MAXNOOFBOARDS` (200 -> 5000).  All structs sized by these constants are now significantly larger.  See the [Changed Constants](#ChangedConstants) section below.  A new dynamic API function `CalcAllTablesPBNx` is added that avoids these large structs entirely.  See [CalcAllTablesPBNx](#CalcAllTablesPBNx).
+> **Note (ddss fork):** The ddss fork changes the values of `MAXNOOFTABLES` (40 -> 1000) and `MAXNOOFBOARDS` (200 -> 5000).  All structs sized by these constants are now significantly larger.  See the [Changed Constants](#ChangedConstants) section below.  A new dynamic API function `CalcAllTablesPBNx` is added that avoids these large structs entirely.  See [CalcAllTablesPBNx](#CalcAllTablesPBNx).
 
 [Return codes](#ReturnCodes) are given at the end.
 
@@ -144,7 +144,7 @@ The functions `AnalysePlayBin`, `AnalysePlayPBN`, `AnalyseAllPlaysBin` and `Anal
 </tr>
 <tr><td colspan="4">&nbsp;</td></tr>
 <tr>
-<td rowspan="6"><code><a href="#CalcAllTablesPBNx">CalcAllTablesPBNx</a></code></td><td><code>int&nbsp;numDeals</code></td><td rowspan="6">PBN</td><td rowspan="6"><strong>(New in this fork.)</strong> Dynamic-size batch API. Solves any number of deals using plain arrays. No wrapper structs, no compile-time size limits. Recommended for new code and language interop.</td>
+<td rowspan="6"><code><a href="#CalcAllTablesPBNx">CalcAllTablesPBNx</a></code></td><td><code>int&nbsp;numDeals</code></td><td rowspan="6">PBN</td><td rowspan="6"><strong>(New in the ddss fork.)</strong> Dynamic-size batch API. Solves any number of deals using plain arrays. No wrapper structs, no compile-time size limits. Recommended for new code and language interop.</td>
 </tr>
 <tr>
 <td><code>struct&nbsp;<a href="#ddTableDealPBN">ddTableDealPBN</a>&nbsp;dealCards[]</code></td>
@@ -969,11 +969,11 @@ The maximum number of DD tables in a CalcAllTables call depends on the number of
 </tbody>
 </table>
 
-> **Note (this fork):** With `MAXNOOFTABLES=1000`, the maximum number of DD tables per `CalcAllTables`/`CalcAllTablesPBN` call is now much larger (up to 1000 for 5 strains, up to 5000 boards).  However, for new code, `CalcAllTablesPBNx` (below) is preferred as it has no fixed limit.
+> **Note (ddss fork):** With `MAXNOOFTABLES=1000`, the maximum number of DD tables per `CalcAllTables`/`CalcAllTablesPBN` call is now much larger (up to 1000 for 5 strains, up to 5000 boards).  However, for new code, `CalcAllTablesPBNx` (below) is preferred as it has no fixed limit.
 
 <a name="CalcAllTablesPBNx"></a>
 
-### CalcAllTablesPBNx (new in dds-bridge fork)
+### CalcAllTablesPBNx (new in ddss fork)
 
 ```c
 int CalcAllTablesPBNx(
@@ -985,7 +985,7 @@ int CalcAllTablesPBNx(
   struct parResults par[]);
 ```
 
-**Added in this fork.** Dynamic-size batch API that solves any number of deals without compile-time limits.
+**Added in the ddss fork.** Dynamic-size batch API that solves any number of deals without compile-time limits.
 
 The caller passes plain arrays of any length.  The library handles internal chunking (currently 1000 deals per batch), memory allocation, and thread distribution automatically.
 
@@ -1388,11 +1388,11 @@ Invalid suit or rank supplied. (c) A played card is not held by the right player
 </table>
 
 <a name="ChangedConstants"></a>
-## Changed Constants (dds-bridge fork)
+## Changed Constants (ddss fork)
 
 The following compile-time constants in `dll.h` have been changed from the upstream DDS 2.9.0 values:
 
-| Constant | Upstream value | This fork | Notes |
+| Constant | Upstream value | ddss fork | Notes |
 |----------|---------------|-----------|-------|
 | `MAXNOOFTABLES` | 40 | 1000 | Internal chunk size for batch APIs |
 | `MAXNOOFBOARDS` | 200 | 5000 (`MAXNOOFTABLES * DDS_STRAINS`) | Was independent; now derived |
@@ -1401,7 +1401,7 @@ The following compile-time constants in `dll.h` have been changed from the upstr
 
 The new `CalcAllTablesPBNx` API avoids this problem entirely by using only small, fixed-size per-deal structs.
 
-| Affected struct | Upstream size (approx) | This fork size (approx) |
+| Affected struct | Upstream size (approx) | ddss fork size (approx) |
 |----------------|----------------------|------------------------|
 | `boards` | ~18 KB | ~460 KB |
 | `boardsPBN` | ~22 KB | ~550 KB |
@@ -1414,7 +1414,7 @@ The new `CalcAllTablesPBNx` API avoids this problem entirely by using only small
 | `playTracesPBN` | ~22 KB | ~540 KB |
 | `solvedPlays` | ~43 KB | ~1.1 MB |
 
-## Internal Behavioral Changes (dds-bridge fork)
+## Internal Behavioral Changes (ddss fork)
 
 These do not change the API contract but affect internal behavior:
 

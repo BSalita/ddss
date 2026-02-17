@@ -4,7 +4,7 @@ DDS is a double-dummy solver of bridge hands.  It is provided as a Windows DLL a
 
 DDS offers a wide range of functions, including par-score calculations.
 
-This fork (`dds-bridge`) adds performance optimizations (up to ~98x vs out-of-box single-threaded) and a dynamic batch API (`CalcAllTablesPBNx`).  See `METRICS_TRUTH_TABLE.md` for benchmarks and API change details.
+The `ddss` fork adds performance optimizations (up to ~98x vs out-of-box single-threaded) and a dynamic batch API (`CalcAllTablesPBNx`).  See `METRICS_TRUTH_TABLE.md` for benchmarks and API change details.
 
 Based on DDS 2.9.0, licensed under the Apache 2.0 license in the LICENSE file.
 
@@ -44,7 +44,7 @@ The distribution consists of the following directories.
 * **tools**, Python comparison scripts for backend evaluation.
 * **examples**, some minimal programs showing how to interface in practice with a number of library functions.
 
-There is a parallel distribution, [**ddd**](https://github.com/dds-bridge/ddd).  It consisting of an old driver program for DDS contributed under the GPL (not under the Apache license) by Flip Cronje, and updated by us to support the multi-threaded library file.
+There is a parallel distribution, [**ddd**](https://github.com/dds-bridge/ddd).  It consists of an old driver program for DDS contributed under the GPL (not under the Apache license) by Flip Cronje, and updated by us to support the multi-threaded library file.
 
 
 Installation
@@ -143,7 +143,7 @@ Usage
 
 DDS provides two batch API approaches:
 
-**Recommended: `CalcAllTablesPBNx` (dynamic API, new in this fork)**
+**Recommended: `CalcAllTablesPBNx` (dynamic API, new in the ddss fork)**
 
 Solves any number of deals in a single call.  The library handles internal chunking, memory allocation, and thread distribution automatically.  No compile-time size limits.  This is the preferred API for new code and for language interop (Python, C#, etc.).
 
@@ -247,7 +247,7 @@ Docs
 | Document | Description |
 |----------|-------------|
 | `doc/dll-description.md` | Upstream DDS 2.8.2 API reference (structs, functions, return codes). |
-| `METRICS_TRUTH_TABLE.md` | **This fork's** performance benchmarks, API changes vs upstream DDS 2.9.0, dynamic API docs, and Python/language interop guide. |
+| `METRICS_TRUTH_TABLE.md` | **ddss fork** performance benchmarks, API changes vs upstream DDS 2.9.0, dynamic API docs, and Python/language interop guide. |
 
 Bugs
 ====
