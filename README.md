@@ -4,7 +4,7 @@ DDS is a double-dummy solver of bridge hands.  It is provided as a Windows DLL a
 
 DDS offers a wide range of functions, including par-score calculations.
 
-The `ddss` fork adds performance optimizations (up to ~98x vs out-of-box single-threaded) and a dynamic batch API (`CalcAllTablesPBNx`).  See `METRICS_TRUTH_TABLE.md` for benchmarks and API change details.
+This `ddss` fork adds performance optimizations (up to ~98x vs out-of-box single-threaded) and a dynamic batch API (`CalcAllTablesPBNx`).  See `METRICS_TRUTH_TABLE.md` for benchmarks and API change details.
 
 Based on DDS 2.9.0, licensed under the Apache 2.0 license in the LICENSE file.
 
@@ -27,7 +27,7 @@ Pierre Cossard contributed the code for multi-threading on the Mac using GDS.
 
 Soren Hein made a number of contributions before becoming a co-author starting with v2.8 in 2014.
 
-Robert Salita used AI (Claude Opus 4.6 Max) to refactor for 100x performance gain and greater flexibility.
+Robert Salita used AI (Claude Opus 4) to add batched solving, strain grouping, a persistent thread pool, and a dynamic batch API (`CalcAllTablesPBNx`), achieving ~43x throughput vs OOB multi-threaded (~98x vs OOB single-threaded) on a 32-core machine.
 
 
 Overview
@@ -143,7 +143,7 @@ Usage
 
 DDS provides two batch API approaches:
 
-**Recommended: `CalcAllTablesPBNx` (dynamic API, new in the ddss fork)**
+**Recommended: `CalcAllTablesPBNx` (dynamic API, new in this ddss fork)**
 
 Solves any number of deals in a single call.  The library handles internal chunking, memory allocation, and thread distribution automatically.  No compile-time size limits.  This is the preferred API for new code and for language interop (Python, C#, etc.).
 
