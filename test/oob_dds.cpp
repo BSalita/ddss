@@ -316,6 +316,18 @@ int OobDds::CalcAllTablesPBN(struct ddTableDealsPBN * dealsp, int mode,
   return RETURN_UNKNOWN_FAULT;
 }
 
+int OobDds::CalcAllTablesPBNRaw(void * dealsp, int mode,
+  int trumpFilter[5], void * resp, void * presp)
+{
+  if (! p_CalcAllTablesPBN)
+    return RETURN_UNKNOWN_FAULT;
+
+  typedef int (STDCALL *pfn_raw)(void *, int, int[5], void *, void *);
+  auto fn = reinterpret_cast<pfn_raw>(
+    reinterpret_cast<void(*)()>(p_CalcAllTablesPBN));
+  return fn(dealsp, mode, trumpFilter, resp, presp);
+}
+
 int OobDds::CalcAllTablesPBNx(int numDeals, struct ddTableDealPBN dealCards[],
   int mode, int trumpFilter[5], struct ddTableResults results[],
   struct parResults par[])

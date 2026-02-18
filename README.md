@@ -4,7 +4,7 @@ DDS is a double-dummy solver of bridge hands.  It is provided as a Windows DLL a
 
 DDS offers a wide range of functions, including par-score calculations.
 
-This `ddss` fork adds performance optimizations (~17x vs OOB single-threaded, ~7x vs OOB multi-threaded), a dynamic batch API (`CalcAllTablesPBNx`), and OOB cross-verification (`--verify`).  All results verified cell-by-cell against a freshly built upstream DDS DLL.  See `METRICS_TRUTH_TABLE.md` for benchmarks and API change details.
+This `ddss` fork adds performance optimizations (1.44x vs OOB batched, ~7.6x vs OOB serial, ~17.7x vs OOB single-threaded), a dynamic batch API (`CalcAllTablesPBNx`), and OOB cross-verification (`--verify`).  All results verified cell-by-cell against a freshly built upstream DDS DLL using a fair batched-vs-batched comparison.  See `METRICS_TRUTH_TABLE.md` for benchmarks and API change details.
 
 Based on DDS 2.9.0, licensed under the Apache 2.0 license in the LICENSE file.
 
@@ -27,7 +27,7 @@ Pierre Cossard contributed the code for multi-threading on the Mac using GDS.
 
 Soren Hein made a number of contributions before becoming a co-author starting with v2.8 in 2014.
 
-Robert Salita used AI (Claude Opus 4) to add batched solving, strain grouping, a persistent thread pool, a dynamic batch API (`CalcAllTablesPBNx`), and OOB cross-verification (`--verify`), achieving ~7x throughput vs OOB multi-threaded (~17x vs OOB single-threaded) on a 32-core machine. All results verified cell-by-cell against a freshly built upstream DDS DLL.
+Robert Salita used AI (Claude Opus 4) to add batched solving, strain grouping, a persistent thread pool, a dynamic batch API (`CalcAllTablesPBNx`), and OOB cross-verification (`--verify`), achieving 1.44x throughput vs OOB batched (~7.6x vs OOB serial) on a 32-core machine. All results verified cell-by-cell against a freshly built upstream DDS DLL using a fair batched-vs-batched comparison.
 
 
 Overview
@@ -134,17 +134,17 @@ The `--verify` flag enables cell-by-cell comparison of DD results against an ups
 
 **How it works:**
 - The OOB DLL is dynamically loaded via `LoadLibraryA` (Windows) or `dlopen` (Linux/macOS).
-- Each deal is solved independently through the OOB DLL's `CalcDDtablePBN` and compared cell-by-cell against the ddss results.
+- Deals are solved in batches of 40 through the OOB DLL's `CalcAllTablesPBN` batch API -- giving OOB the same cross-deal parallelism that ddss gets from `CalcAllTablesPBNx`.  OOB-compatible batch structs (sized at the upstream `MAXNOOFTABLES=40`) are used to avoid ABI mismatch with the ddss-compiled structs.
+- The OOB DLL must export `CalcAllTablesPBN` (all standard upstream builds do).  Verification fails fast if it is missing.
+- Results are compared cell-by-cell against the ddss results.
 - Mismatches are reported to console and written to `oob_mismatches.csv` in the report directory.
 - HTML reports (when `--html-report` is used) include an `oob_dd20` column highlighting any disagreements.
-- Timing comparisons show ddss batched throughput vs OOB serial throughput.
+- Timing comparisons show ddss batched throughput vs OOB batched throughput.
 
 **Behavior:**
 - `--verify` alone: looks for `dds_oob.dll`/`dds_oob.so` next to the executable; errors if not found.
 - `--oob-dll path` alone: implicitly enables verification using the specified DLL.
 - Neither flag: no verification, normal solve only.
-
-**Note:** The OOB DLL's `CalcAllTablesPBN` batch API cannot be used for comparison because the ddss fork changed `MAXNOOFTABLES` from 40 to 1000, making the wrapper struct sizes ABI-incompatible.  The single-deal `CalcDDtablePBN` API uses small, fixed-size structs that are safe across builds.
 
 
 Supported systems

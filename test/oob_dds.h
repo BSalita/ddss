@@ -150,6 +150,12 @@ public:
     int mode, int trumpFilter[5], struct ddTableResults results[],
     struct parResults par[]);
 
+  // Raw batch call that bypasses ddss-sized struct typedefs.
+  // Allows passing OOB-compatible (upstream-sized) batch structs
+  // directly to the OOB DLL's CalcAllTablesPBN without ABI mismatch.
+  int CalcAllTablesPBNRaw(void * dealsp, int mode,
+    int trumpFilter[5], void * resp, void * presp);
+
   // Batch board solving
   int SolveAllBoards(struct boardsPBN * bop, struct solvedBoards * solvedp);
   int SolveAllBoardsBin(struct boards * bop, struct solvedBoards * solvedp);

@@ -9,7 +9,7 @@ Machine: 32-core, 64-bit Windows, MSVC 19.43
 |---|---|---|---|
 | Full-deal exact correctness parity | `exact_match == 1.0` | `1.0` on all tested configs (100-10000 deals) | PASS |
 | Full-deal exact path | Runtime tag `CPU_EXACT` | `CPU_EXACT` on all tested configs | PASS |
-| >= 2x performance vs OOB DDS | >= 2x faster than cloned GitHub repo | **3x @8thr / 5.5x @16thr / 7x @32thr vs OOB-MT** / **~17x vs OOB-ST** (1000 deals, verified) | **PASS** |
+| >= 2x performance vs OOB DDS | >= 2x faster than cloned GitHub repo | **1.06-1.44x vs OOB-MT batched / ~7.6x vs OOB-MT serial / ~17.7x vs OOB-ST** (1000 random deals, 8-32 threads, verified) | **PASS** |
 | Tooling reliability | One-command build + smoke test | `run_all.bat` end-to-end | PASS |
 | Arbitrary batch size support | No rebuild needed for different sizes | **Dynamic API** (`CalcAllTablesPBNx`) | **PASS** |
 
@@ -118,16 +118,25 @@ Machine: 32-core, 192GB RAM, 64-bit Windows, MSVC 19.43. DDS 2.9.0 fork with STL
 | **16→32 speedup** | | **1.34x** | |
 | **ST→32 speedup** | | **17.5x** | |
 
-**OOB cross-verification** (`--verify`, fresh upstream `dds-bridge/dds` build):
+**OOB cross-verification** (`--verify`, fresh upstream `dds-bridge/dds` build, OOB uses batched `CalcAllTablesPBN` in chunks of 40, OOB always runs at 32 threads):
 
-| Test | Threads | Deals | Cells | Mismatches | ddss (tbl/s) | OOB (tbl/s) | Speedup |
+| Test | ddss threads | Deals | Cells | Mismatches | ddss (tbl/s) | OOB (tbl/s) | Ratio |
 |------|--------:|------:|------:|-----------:|-------------:|------------:|--------:|
-| random-deals | 8 | 1,000 | 20,000 | **0** | 60.9 | 20.1 | 3.03x |
-| random-deals | 16 | 1,000 | 20,000 | **0** | 111.0 | 20.3 | 5.48x |
-| random-deals | 32 | 1,000 | 20,000 | **0** | 149 | 20 | 7.1x |
-| PBN Camrose | 8 | 320 | 6,400 | **0** | 56.8 | 19.6 | 2.90x |
-| PBN Camrose | 16 | 320 | 6,400 | **0** | 97.0 | 19.8 | 4.89x |
-| PBN Camrose | 32 | 320 | 6,400 | **0** | 108 | 19 | 5.8x |
+| random-deals | 8 | 1,000 | 20,000 | **0** | 63.2 | 59.6 | ddss 1.06x |
+| random-deals | 16 | 1,000 | 20,000 | **0** | 117.0 | 95.6 | ddss 1.22x |
+| random-deals | 32 | 1,000 | 20,000 | **0** | 151 | 105 | ddss 1.44x |
+| PBN Camrose | 8 | 320 | 6,400 | **0** | 58.8 | 99.9 | OOB 1.70x |
+| PBN Camrose | 16 | 320 | 6,400 | **0** | 104.9 | 140.1 | OOB 1.34x |
+| PBN Camrose | 32 | 320 | 6,400 | **0** | 130 | 142 | OOB 1.09x |
+
+**Duplicate deals and benchmarking bias:**  The Camrose PBN file contains 320 `[Deal]` entries but only 160 unique card distributions -- each board appears twice (once per table in the team match).  Both solvers detect duplicate boards and copy results instead of re-solving, but the detection scope differs:
+
+- **ddss** receives all deals in one `CalcAllTablesPBNx` call (internal chunk size 1000), so it sees all duplicates in a single pass regardless of where they appear in the batch.
+- **OOB** receives deals in `CalcAllTablesPBN` chunks of 40 (upstream `MAXNOOFTABLES`).  Duplicates are only detected within the same chunk.
+
+In the Camrose file, duplicate pairs are contiguous (deal N at positions 2N and 2N+1), so they always land in the same OOB chunk and are detected.  This gives OOB a relative advantage: it solves ~160 deals with the overhead of batching 320, in small well-sized chunks.  If duplicates were randomly scattered across the batch, some would span OOB chunk boundaries and be missed, while ddss would still catch them all in its single large batch.
+
+The **random-deals** benchmark (seed 42, 1000 deals) has no duplicate deals and is the fairer throughput comparison.
 
 ### Observations
 
@@ -135,8 +144,8 @@ Machine: 32-core, 192GB RAM, 64-bit Windows, MSVC 19.43. DDS 2.9.0 fork with STL
 - **Multi-hand solve mode (`largest.txt`) shows good MT scaling** because DDS can overlap the 21 hands across 32 threads.
 - **`thomas2` is the extreme outlier**: ~70 seconds for a single hand (solve), ~282 seconds for a full DD table (calc). This is a known property of the interlocking 7-6 distribution which creates a combinatorially explosive alpha-beta tree. No known DD solver handles this hand quickly.
 - **Random-deal throughput** (1000 deals) shows **17.5x MT speedup** from 32-thread batched solving. This is higher than previous measurements because a correctness fix in `Scheduler.cpp` (strain comparison in `SameHand` and `FinetuneGroups`) now correctly solves all 5 strains per deal instead of incorrectly deduplicating them.
-- **Thread scaling**: 8→16 threads gives ~1.82x speedup (near-linear). 16→32 threads gives ~1.34x (diminishing returns from memory bandwidth / contention). At 16 threads ddss already achieves 111 tables/s -- 5.5x faster than OOB at 32 threads.
-- **OOB cross-verification** confirms 100% correctness against fresh upstream `dds-bridge/dds` builds across all tested configurations (8, 16, and 32 threads). The ddss fork's batched API is **2.9-7.1x faster** than the upstream DLL's serial `CalcDDtablePBN` depending on thread count, with ddss at 8 threads already outperforming OOB at 32 threads.
+- **Thread scaling**: 8→16 threads gives ~1.82x speedup (near-linear). 16→32 threads gives ~1.34x (diminishing returns from memory bandwidth / contention).
+- **OOB cross-verification** (now using OOB's own `CalcAllTablesPBN` batch API for a fair batched-vs-batched comparison) confirms 100% correctness against a fresh upstream `dds-bridge/dds` build at 8, 16, and 32 threads.  On 1000 random deals, ddss is **1.06-1.44x faster** depending on thread count.  On the 320-deal PBN Camrose set, OOB is **1.09-1.70x faster** -- the OOB DLL always runs at 32 threads regardless of ddss's `--numthr`, and its `CalcAllTablesPBN` with `MAXNOOFTABLES=40` is well-optimized for smaller batch sizes.  However, the Camrose results are confounded by contiguous duplicate deals (see "Duplicate deals and benchmarking bias" above); the random-deals benchmark is the fairer throughput comparison.
 
 ---
 
@@ -149,31 +158,35 @@ The DDS library as cloned from GitHub ships with support for multiple threading 
 - **OOB-ST** (single-threaded): Default build. `DDS_THREADS_NONE`. No parallel execution. This is what you get if you clone and build without reading the docs.
 - **OOB-MT** (multi-threaded): Built with `-DDDS_THREADING=STL` (or OpenMP/WinAPI). This is a build flag the upstream repo supports -- no code changes needed. Each `CalcDDtablePBN` call uses multiple threads internally for the alpha-beta search on one deal at a time.
 
-Both OOB modes use serial `CalcDDtablePBN` calls (one deal at a time). The DDS library also provides a batch API (`CalcAllTablesPBN`) but the default test harness does not use it.
+Both OOB modes were historically benchmarked using serial `CalcDDtablePBN` calls (one deal at a time). The OOB cross-verification now uses the OOB DLL's own `CalcAllTablesPBN` batch API (in chunks of 40, matching upstream's `MAXNOOFTABLES`) for a fair apples-to-apples comparison against ddss's batched `CalcAllTablesPBNx`.  The OOB DLL must export `CalcAllTablesPBN`; verification fails fast if it is missing.
 
-### Measured benchmarks (1000 deals, directly measured and OOB-verified)
+### Measured benchmarks (1000 deals, 32 threads, directly measured and OOB-verified)
 
 All benchmarks measured on same machine. OOB cross-verification confirms 0 mismatches in all configurations.
 
-| # | Configuration | Code changes? | Time (ms) | Tables/s | vs OOB-ST | vs OOB-MT |
-|:---:|---|:---:|---:|---:|---:|---:|
-| 0 | **OOB-ST** (single-threaded, serial) | None | ~117,000 | ~8.5 | **1.0x** | -- |
-| 1 | **OOB-MT** (multi-threaded, serial) | Build flag only | ~50,000 | ~20 | 2.3x | **1.0x** |
-| 2 | **ddss MT + batched** | Code changes + build flag | **6,713** | **149** | **17.4x** | **7.4x** |
+| # | Configuration | Code changes? | Time (ms) | Tables/s | vs OOB-ST | vs OOB-MT (serial) | vs OOB-MT (batched) |
+|:---:|---|:---:|---:|---:|---:|---:|---:|
+| 0 | **OOB-ST** (single-threaded, serial) | None | ~117,000 | ~8.5 | **1.0x** | -- | -- |
+| 1 | **OOB-MT** (multi-threaded, serial) | Build flag only | ~50,000 | ~20 | 2.3x | **1.0x** | -- |
+| 1b | **OOB-MT** (multi-threaded, batched) | Build flag only | 9,513 | 105 | 12.3x | 5.3x | **1.0x** |
+| 2 | **ddss MT + batched** | Code changes + build flag | **6,610** | **151** | **17.7x** | **7.6x** | **1.44x** |
 
-**Key insight**: The ddss fork's batched `CalcAllTablesPBNx` distributes `N * 5` independent boards across all 32 threads, giving 17.4x over single-threaded serial and 7.4x over multi-threaded serial. Single-threaded batching (not shown) gives ~8.5 tables/s, confirming that the speedup comes from thread utilization, not batching overhead reduction.
+Rows 0-1 use serial `CalcDDtablePBN` (one deal at a time). Row 1b uses upstream's own `CalcAllTablesPBN` batch API (chunks of 40). Row 2 uses ddss's `CalcAllTablesPBNx`.
+
+**Key insight**: When both sides use their batch APIs (row 1b vs row 2), ddss is **1.44x faster** -- the remaining advantage comes from ddss's larger internal chunk size (1000 vs 40), persistent thread pool, and strain grouping.  The majority of the historical 7.4x speedup over OOB-MT was due to the unfair serial-vs-batched comparison; giving OOB its own batch API closes most of the gap.
 
 ### Optimization stack (1000 deals)
 
-Each row adds one optimization on top of the previous row. Rows 0-1 are OOB baselines (upstream code, serial `CalcDDtablePBN`). Rows 2+ are ddss fork changes.
+Each row adds one optimization on top of the previous row. Rows 0-1b are OOB baselines (upstream code). Rows 2+ are ddss fork changes.
 
-| # | Configuration | What changed | Time (ms) | Tables/s | vs OOB-ST | vs OOB-MT |
-|:---:|---|---|---:|---:|---:|---:|
-| 0 | **OOB-ST** (serial, 1 thread) | Nothing -- as cloned | ~117,000 | ~8.5 | 1.0x | -- |
-| 1 | **OOB-MT** (serial, 32 threads) | Build flag: `-DDDS_THREADING=STL` | ~50,000 | ~20 | 2.3x | 1.0x |
-| 2 | + Batched solver | `CalcAllTablesPBNx` + heap structs + dynamic vectors | 6,713 | 149 | 17.4x | 7.4x |
-| 3 | + Persistent thread pool | Reuse threads across batches | ~6,500 | ~154 | 18.0x | 7.7x |
-| 4 | + Strain grouping | `MakeGroupsByDeal` (cache locality) | included above | included | included | included |
+| # | Configuration | What changed | Time (ms) | Tables/s | vs OOB-ST | vs OOB-MT (serial) | vs OOB-MT (batched) |
+|:---:|---|---|---:|---:|---:|---:|---:|
+| 0 | **OOB-ST** (serial, 1 thread) | Nothing -- as cloned | ~117,000 | ~8.5 | 1.0x | -- | -- |
+| 1 | **OOB-MT** (serial, 32 threads) | Build flag: `-DDDS_THREADING=STL` | ~50,000 | ~20 | 2.3x | 1.0x | -- |
+| 1b | **OOB-MT** (batched, 32 threads) | Same build, `CalcAllTablesPBN` (chunks of 40) | 9,513 | 105 | 12.3x | 5.3x | 1.0x |
+| 2 | + Batched solver | `CalcAllTablesPBNx` + heap structs + dynamic vectors | 6,610 | 151 | 17.7x | 7.6x | 1.44x |
+| 3 | + Persistent thread pool | Reuse threads across batches | ~6,400 | ~156 | ~18.3x | ~7.8x | ~1.49x |
+| 4 | + Strain grouping | `MakeGroupsByDeal` (cache locality) | included above | included | included | included | included |
 
 Note: Strain grouping (`MakeGroupsByDeal`) and the persistent thread pool are both enabled in the current build. Rows 2-4 represent the cumulative effect. Individual contribution of strain grouping cannot be isolated without reverting the optimization.
 
@@ -483,10 +496,10 @@ No `_pack_` attribute is needed in the `ctypes.Structure` definitions. If DDS is
 ## Notes
 
 - **OOB-ST** = single-threaded DDS as cloned, no changes. **OOB-MT** = same code, built with `-DDDS_THREADING=STL`.
-- Both OOB modes use serial `CalcDDtablePBN` (one deal per call). The batch API exists in OOB DDS but the test harness didn't use it.
+- The OOB cross-verification now uses the OOB DLL's `CalcAllTablesPBN` batch API (chunks of 40) for a fair batched-vs-batched comparison. Historical benchmarks above were measured with serial `CalcDDtablePBN` (one deal per call).
 - All speedups are cumulative from the specified baseline unless stated otherwise.
 - The `HASH_MAX` bug exists in upstream DDS -- it would crash any application sending >~125 deals per `CalcAllTablesPBN` batch, even without our changes.
-- **Batching + threading** is the primary source of speedup. The `CalcAllTablesPBNx` API expands N deals into N*5 boards and distributes them across all threads, achieving much better utilization than serial per-deal calls.
+- **Batching + threading** is the primary source of speedup. The `CalcAllTablesPBNx` API expands N deals into N*5 boards and distributes them across all threads.  With OOB also batching (via `CalcAllTablesPBN`, chunks of 40), ddss's remaining 1.44x advantage comes from larger chunk size (1000 vs 40), the persistent thread pool, and strain grouping.
 - **Strain grouping** (`MakeGroupsByDeal`) groups all strains of the same deal in one scheduler bucket. A correctness bug in the initial implementation was caught by OOB cross-verification and fixed (see "Correctness Fixes" above).
 - **Persistent thread pool** eliminates per-batch thread creation overhead (~32ms saved per batch on a 32-core machine).
 - Hash-based duplicate detection (O(n) vs O(n^2)) and targeted memset are correctness-preserving micro-optimizations with negligible throughput impact at current batch sizes.

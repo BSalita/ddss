@@ -217,10 +217,36 @@ namespace
     f << "}\n";
   }
 
-  // Solve deals one-at-a-time via OOB DLL and compare against ddss results.
+  // OOB-compatible batch structs matching upstream DDS layout
+  // (MAXNOOFTABLES=40, MAXNOOFBOARDS=200).  These are ABI-compatible
+  // with an unmodified upstream DDS DLL, unlike the ddss-compiled
+  // structs which use MAXNOOFTABLES=1000.
+  static constexpr int OOB_MAXNOOFTABLES = 40;
+  static constexpr int OOB_MAXNOOFBOARDS = OOB_MAXNOOFTABLES * DDS_STRAINS;
+
+  struct OobDdTableDealsPBN
+  {
+    int noOfTables;
+    ddTableDealPBN deals[OOB_MAXNOOFBOARDS];
+  };
+
+  struct OobDdTablesRes
+  {
+    int noOfBoards;
+    ddTableResults results[OOB_MAXNOOFBOARDS];
+  };
+
+  struct OobAllParResults
+  {
+    parResults presults[OOB_MAXNOOFTABLES];
+  };
+
+  // Solve deals via OOB DLL's batch CalcAllTablesPBN API and compare
+  // against ddss results.  Chunks into groups of OOB_MAXNOOFTABLES (40)
+  // to match the upstream struct layout.
   // ddssMs is the elapsed time for the ddss solve pass (for comparison).
   // If oobResultsOut is non-null, the OOB results are stored there.
-  // Returns the number of mismatched cells.
+  // Returns the number of mismatched cells, or -1 on fatal error.
   int CompareWithOob(
     OobDds& oob,
     const vector<dealPBN>& deals,
@@ -232,48 +258,94 @@ namespace
     vector<ddTableResults> * oobResultsOut = nullptr)
   {
     if (! oob.IsLoaded())
-      return 0;
+    {
+      cout << "OOB DLL not loaded\n";
+      return -1;
+    }
 
     cout << "\n=== OOB Cross-Verification ===\n";
     cout << "OOB DLL:   " << oob.Path() << "\n";
+    cout << "OOB mode:  batched (CalcAllTablesPBN, chunks of "
+         << OOB_MAXNOOFTABLES << ")\n";
     cout << "Deals:     " << nDeals << " (" << (nDeals * 20) << " cells)\n";
-
-    const string mmPath = reportDir + "/" + csvName;
-    ofstream mm(mmPath.c_str());
-    mm << "deal_idx,combo_idx,strain,declarer,ddss,oob,delta\n";
 
     if (oobResultsOut)
       oobResultsOut->resize(static_cast<size_t>(nDeals));
 
+    // Solve all deals via OOB batch API.
+    vector<ddTableResults> oobTables(static_cast<size_t>(nDeals));
+
+    auto batchDeals = std::make_unique<OobDdTableDealsPBN>();
+    auto batchRes   = std::make_unique<OobDdTablesRes>();
+    auto batchPar   = std::make_unique<OobAllParResults>();
+
     const chrono::high_resolution_clock::time_point t0 =
       chrono::high_resolution_clock::now();
 
-    int totalMismatches = 0;
-    int totalMatches = 0;
     int oobErrors = 0;
 
-    for (int i = 0; i < nDeals; i++)
+    for (int i = 0; i < nDeals; i += OOB_MAXNOOFTABLES)
     {
-      ddTableDealPBN td;
-      memset(&td, 0, sizeof(td));
-      strncpy(td.cards, deals[static_cast<size_t>(i)].remainCards,
-        sizeof(td.cards) - 1);
+      const int count = min(OOB_MAXNOOFTABLES, nDeals - i);
+      memset(batchDeals.get(), 0, sizeof(OobDdTableDealsPBN));
+      memset(batchRes.get(), 0, sizeof(OobDdTablesRes));
+      memset(batchPar.get(), 0, sizeof(OobAllParResults));
 
-      ddTableResults oobTable;
-      memset(&oobTable, 0, sizeof(oobTable));
-      const int ret = oob.CalcDDtablePBN(td, &oobTable);
+      batchDeals->noOfTables = count;
+      for (int j = 0; j < count; j++)
+      {
+        strncpy(batchDeals->deals[j].cards,
+                deals[static_cast<size_t>(i + j)].remainCards,
+                sizeof(batchDeals->deals[j].cards) - 1);
+      }
+
+      int filter[DDS_STRAINS] = {0, 0, 0, 0, 0};
+      const int ret = oob.CalcAllTablesPBNRaw(
+        batchDeals.get(), -1, filter,
+        batchRes.get(), batchPar.get());
+
+      if (ret == RETURN_UNKNOWN_FAULT)
+      {
+        cout << "FATAL: OOB DLL does not export CalcAllTablesPBN\n";
+        return -1;
+      }
+
       if (ret != RETURN_NO_FAULT)
       {
-        oobErrors++;
-        if (oobResultsOut)
-          memset(&(*oobResultsOut)[static_cast<size_t>(i)], 0, sizeof(ddTableResults));
+        char errBuf[80] = {0};
+        oob.ErrorMessage(ret, errBuf);
+        cout << "OOB CalcAllTablesPBN error at batch offset " << i
+             << " (count " << count << "): " << ret << " " << errBuf << "\n";
+        oobErrors += count;
+        for (int j = 0; j < count; j++)
+          memset(&oobTables[static_cast<size_t>(i + j)], 0, sizeof(ddTableResults));
         continue;
       }
 
+      for (int j = 0; j < count; j++)
+        oobTables[static_cast<size_t>(i + j)] = batchRes->results[j];
+    }
+
+    const chrono::high_resolution_clock::time_point t1 =
+      chrono::high_resolution_clock::now();
+    const double oobMs =
+      chrono::duration_cast<chrono::duration<double, milli> >(t1 - t0).count();
+
+    // Compare results cell-by-cell.
+    const string mmPath = reportDir + "/" + csvName;
+    ofstream mm(mmPath.c_str());
+    mm << "deal_idx,combo_idx,strain,declarer,ddss,oob,delta\n";
+
+    int totalMismatches = 0;
+    int totalMatches = 0;
+
+    for (int i = 0; i < nDeals; i++)
+    {
+      const ddTableResults& got = ddssResults[static_cast<size_t>(i)];
+      const ddTableResults& oobTable = oobTables[static_cast<size_t>(i)];
+
       if (oobResultsOut)
         (*oobResultsOut)[static_cast<size_t>(i)] = oobTable;
-
-      const ddTableResults& got = ddssResults[static_cast<size_t>(i)];
 
       for (int strain = 0; strain < DDS_STRAINS; strain++)
       {
@@ -294,24 +366,16 @@ namespace
           }
         }
       }
-
-      if (ShouldPrintProgress(i + 1, nDeals))
-        PrintProgress("oob-verify", i + 1, nDeals, t0);
     }
     mm.close();
-
-    const chrono::high_resolution_clock::time_point t1 =
-      chrono::high_resolution_clock::now();
-    const double oobMs =
-      chrono::duration_cast<chrono::duration<double, milli> >(t1 - t0).count();
 
     const double ddssRate = (ddssMs > 0.0) ? (nDeals * 1000.0 / ddssMs) : 0.0;
     const double oobRate = (oobMs > 0.0) ? (nDeals * 1000.0 / oobMs) : 0.0;
 
     cout << "\n--- Timing ---\n";
-    cout << "  ddss:  " << fixed << setprecision(1) << ddssMs << " ms  ("
+    cout << "  ddss (batched):  " << fixed << setprecision(1) << ddssMs << " ms  ("
          << setprecision(1) << ddssRate << " tables/s)\n";
-    cout << "  OOB:   " << fixed << setprecision(1) << oobMs << " ms  ("
+    cout << "  OOB  (batched):  " << fixed << setprecision(1) << oobMs << " ms  ("
          << setprecision(1) << oobRate << " tables/s)\n";
     if (oobMs > 0.0 && ddssMs > 0.0)
     {
