@@ -210,6 +210,42 @@ Variance: random deals produce +/-15% across runs; numbers shown are from repres
 
 ---
 
+## Attempted Isolated Improvements That Did Not Help
+
+These changes were explicitly tested in isolation with an automated A/B harness so future performance questions can be answered with measured data instead of guesswork.
+
+### Method
+
+- Baseline and each candidate change were measured on the same machine: 32-core Windows, MSVC 19.43, Release build, `DDS_THREADING=STL`.
+- Workload: `CalcAllTablesPBNx` on 2000 random deals, seed 42.
+- Each candidate was applied alone, rebuilt if needed, benchmarked for 3 timed iterations in a fresh subprocess, then reverted before testing the next candidate.
+- Harness scripts:
+  - `src/acbl/benchmark_dd_solve.py`
+  - `src/acbl/benchmark_improvements.py`
+
+### Results
+
+| Improvement | Best time (s) | Deals/s | vs baseline | Result |
+|---|---:|---:|---:|---|
+| Baseline | **12.958** | **154** | **1.00x** | Reference |
+| `DDS_AGGRESSIVE_OPT=ON` (`/Ox /GL /LTCG`) | 13.342 | 150 | 0.97x | Slightly slower |
+| Remove dead `vector<futureTricks>` allocation in `CalcChunkCommon()` | 13.316 | 150 | 0.97x | Slightly slower / within noise |
+| Replace Scheduler insertion sort with `std::sort` | 13.687 | 146 | 0.95x | Slower |
+| Cache ctypes array type objects in `dds_ddss.py` | 13.585 | 147 | 0.95x | Slower |
+| All above combined | 13.421 | 149 | 0.97x | Slightly slower |
+
+### Takeaways
+
+- **We tried these changes and they did not improve throughput on the measured workload.**
+- The solver was already saturating all 32 cores (~93-96% average CPU), so these changes did not unlock more parallelism.
+- Python-side `ctypes` micro-optimizations were too small relative to total native solve time to matter at 2000-deal batch sizes.
+- The Scheduler's insertion-sort blocks were not hot enough for `std::sort` to pay for itself on this workload.
+- `DDS_AGGRESSIVE_OPT` is **not automatically faster** than the default Release build on this machine; benchmark it on the target workload before enabling it by default.
+
+Unless future profiling shows a different hot path or a different workload mix, these candidates should be considered **measured and not beneficial**.
+
+---
+
 ## API Changes vs Upstream DDS 2.9.0
 
 ### Breaking change: `MAXNOOFTABLES` and `MAXNOOFBOARDS` constants

@@ -115,7 +115,7 @@ make -j$(sysctl -n hw.ncpu)
 
 ```bash
 # Quick smoke test with a PBN URL
-./dtest --pbn-source https://raw.githubusercontent.com/ContractBridge/pbn-files/refs/heads/master/1997-Cavendish_Invitational_Pairs_Tournament/ROUND1.PBN --report-dir smoke_test
+./dtest --pbn-source raw.githubusercontent.com/ContractBridge/pbn-files/refs/heads/master/1997-Cavendish_Invitational_Pairs_Tournament/ROUND1.PBN --report-dir smoke_test
 
 # Random deals benchmark
 ./dtest --random-deals 1000 --report-dir benchmark
