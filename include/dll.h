@@ -11,7 +11,11 @@
 #ifndef DDS_DLL_H
 #define DDS_DLL_H
 
-#if (defined(_WIN32) || defined(__CYGWIN__)) && ! defined(__clang__)
+#if (defined(_WIN32) || defined(__CYGWIN__)) && \
+    (! defined(__clang__) || defined(_MSC_VER))
+  // MSVC and clang-cl (which defines _MSC_VER) both support
+  // __declspec(dllexport) and __stdcall.  Only MinGW-style clang
+  // falls through to the empty definitions.
   #define DLLEXPORT __declspec(dllexport)
   #define STDCALL __stdcall
 #else

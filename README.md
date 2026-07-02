@@ -126,24 +126,32 @@ make -j$(sysctl -n hw.ncpu)
 
 ### OOB cross-verification
 
-The `--verify` flag enables cell-by-cell comparison of DD results against an upstream (out-of-box) DDS DLL loaded at runtime.  This catches correctness regressions introduced by optimizations.
+The `--verify` flag enables cell-by-cell comparison of DD results against one or more upstream (out-of-box) DDS DLLs loaded at runtime.  This catches correctness regressions introduced by optimizations, and doubles as an engine benchmark: `--oob-dll` may be repeated to compare several engines (e.g. dds 2.9 and dds 3.0) side by side against ddss.
 
-**Setup:**
-1. Build an upstream `dds-bridge/dds` DLL from source (or obtain one).
-2. Place it as `dds_oob.dll` (Windows) or `dds_oob.so` (Linux/macOS) next to the `dtest` executable.  Or specify the path explicitly with `--oob-dll`.
+**Setup (Windows, one command):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\build_oob_dlls.ps1
+```
+
+This clones `dds-bridge/dds` at pinned commits into `external/` (gitignored), builds a 2.9 DLL and a 3.0 DLL with MSVC, and installs them next to `dtest.exe` as `dds_oob.dll` and `dds3_oob.dll`.  It also patches an upstream DDS 3.0 project-file bug (`solution/dds_native.vcxproj` omits `library/src/system/parallel_boards.cpp`, causing unresolved externals at link time).
+
+**Setup (manual):**
+1. Build an upstream `dds-bridge/dds` DLL from source (or obtain one).  Both the 2.9 branch and the 3.0 rewrite (develop branch, `dds_native.dll` from `solution/dds_native.vcxproj`) export the required legacy C API.
+2. Place it as `dds_oob.dll` (Windows) or `dds_oob.so` (Linux/macOS) next to the `dtest` executable.  A DDS 3.0 DLL named `dds3_oob.dll`/`dds3_oob.so` in the same directory is picked up automatically as a second engine.  Or specify paths explicitly with one or more `--oob-dll` flags.
 
 **How it works:**
-- The OOB DLL is dynamically loaded via `LoadLibraryA` (Windows) or `dlopen` (Linux/macOS).
-- Deals are solved in batches of 40 through the OOB DLL's `CalcAllTablesPBN` batch API -- giving OOB the same cross-deal parallelism that ddss gets from `CalcAllTablesPBNx`.  OOB-compatible batch structs (sized at the upstream `MAXNOOFTABLES=40`) are used to avoid ABI mismatch with the ddss-compiled structs.
-- The OOB DLL must export `CalcAllTablesPBN` (all standard upstream builds do).  Verification fails fast if it is missing.
-- Results are compared cell-by-cell against the ddss results.
-- Mismatches are reported to console and written to `oob_mismatches.csv` in the report directory.
-- HTML reports (when `--html-report` is used) include an `oob_dd20` column highlighting any disagreements.
-- Timing comparisons show ddss batched throughput vs OOB batched throughput.
+- Each OOB DLL is dynamically loaded via `LoadLibraryA` (Windows) or `dlopen` (Linux/macOS) and labeled by its own `GetDDSInfo` version string (e.g. `dds 2.9.0`, `dds 3.0.0`).
+- Deals are solved in batches of 40 through each OOB DLL's `CalcAllTablesPBN` batch API -- giving OOB the same cross-deal parallelism that ddss gets from `CalcAllTablesPBNx`.  OOB-compatible batch structs (sized at the upstream `MAXNOOFTABLES=40`) are used to avoid ABI mismatch with the ddss-compiled structs.  The layout is shared by DDS 2.9 and DDS 3.0.
+- Each OOB DLL must export `CalcAllTablesPBN` (all standard upstream builds do).  Verification fails fast if it is missing.
+- Results are compared cell-by-cell against the ddss results, and pairwise between the reference engines.
+- An `Engine Comparison Summary` table reports each engine's elapsed time, tables/s, speed relative to ddss, and mismatch count vs ddss, followed by pairwise reference-engine checks and an overall PASS/FAIL.
+- Mismatches are written to `oob_mismatches.csv` in the report directory with `engine_a`/`engine_b` columns.
+- HTML reports (when `--html-report` is used) include one `<engine>_dd20` column per engine, highlighting any disagreements.
 
 **Behavior:**
-- `--verify` alone: looks for `dds_oob.dll`/`dds_oob.so` next to the executable; errors if not found.
-- `--oob-dll path` alone: implicitly enables verification using the specified DLL.
+- `--verify` alone: looks for `dds_oob.dll`/`dds_oob.so` (and optionally `dds3_oob.dll`/`dds3_oob.so`) next to the executable; errors if neither is found.
+- `--oob-dll path` alone: implicitly enables verification using the specified DLL(s).
 - Neither flag: no verification, normal solve only.
 
 
@@ -228,7 +236,7 @@ The `dtest` program supports DDS solver testing, random deal generation, PBN eva
 | `-g` | `--report-dir` | `p` | `dds_compare_reports` | Output directory for reports (JSON, CSV). |
 | `-p` | `--pbn-source` | `s` | *(none)* | Local PBN file path or URL. Enables PBN evaluation mode. |
 | `-w` | `--html-report` | `f` | *(none)* | Write a readable HTML report file (intended for PBN evaluation mode). |
-| `-o` | `--oob-dll` | `p` | *(auto)* | Path to an OOB (upstream) DDS DLL for cross-verification. Implicitly enables `--verify`. Default: `dds_oob.dll` next to the executable. |
+| `-o` | `--oob-dll` | `p` | *(auto)* | Path to an OOB (upstream) DDS DLL for cross-verification. May be repeated to compare several engines. Implicitly enables `--verify`. Default: `dds_oob.dll` (plus `dds3_oob.dll` if present) next to the executable. |
 | `-v` | `--verify` | *(none)* | `off` | Enable OOB cross-verification of DD results. Requires `--oob-dll` or `dds_oob.dll` in the executable's directory. |
 
 Run `dtest` with no arguments to see the built-in help text.
@@ -251,6 +259,11 @@ Run `dtest` with no arguments to see the built-in help text.
 
 # OOB cross-verification with explicit DLL path
 ./dtest --random-deals 100 --verify --oob-dll /path/to/upstream/dds.dll
+
+# Three-way comparison: ddss vs dds 2.9 vs dds 3.0
+./dtest --random-deals 500 \
+  --oob-dll /path/to/dds29/dds.dll \
+  --oob-dll /path/to/dds3/dds_native.dll
 
 # PBN evaluation with OOB verification and HTML report
 ./dtest --pbn-source deals.pbn --verify --html-report report.html

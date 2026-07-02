@@ -246,6 +246,132 @@ Unless future profiling shows a different hot path or a different workload mix, 
 
 ---
 
+## Search For A Significantly Faster Method (2026-07-02)
+
+A systematic investigation into whether any known method solves full DD tables
+significantly faster than the current ddss batched solver.  Machine: AMD Ryzen 9
+9950X3D (16 cores / 32 threads, dual CCD, one with 3D V-cache), Windows 11,
+MSVC 19.43.  Baseline: `CalcAllTablesPBNx`, 500 random deals, seed 42, 32
+threads = **136-142 tables/s** (1000 deals: 135 t/s, OOB-verified 0 mismatches,
+1.43x vs upstream batched).
+
+### Alternative solvers (measured head-to-head)
+
+| Candidate | Setup | Result |
+|---|---|---|
+| **bcalc** (Piotr Beling, C API DLL v14020) | Same 100 deals, 32 app threads, one solver per deal, strains outer / leaders inner (per API docs) | **2.7x slower** than ddss (45 vs 123 tables/s). All 2000 cells matched. (One-off harness `bcalc_probe/bench_bcalc.cpp`, removed after the investigation concluded.) |
+| **bcalc** (bcalconsole v19.08, newest engine) | 50 deals via stdin, `-q -d PBN -t A`, single-threaded | 211 ms/table vs ddss single-threaded 127 ms/table → **~1.7x slower**, and the console has no MT batch mode. |
+| GPU solvers | Literature search | No production GPU DD solver exists (2026). Current research (Univ. of Alberta "setrograde" endgame databases, IJCAI 2025) precomputes 24/28-card endgames; a 6-trick DB reportedly prunes ~75% of the search tree but requires TB-scale storage and is not publicly available. The only credible future path to a step-change in exact solve speed. |
+| Precomputed datasets | Literature search | GIB library (717k deals), pgx/HuggingFace DDS datasets exist. Useful to *avoid* solving for standard training corpora, but not a faster solver. |
+
+bcalc was the only commonly cited "faster than DDS" engine.  On this batched
+full-table workload the claim does not hold: ddss is decisively faster at equal
+thread counts, and equal single-threaded.
+
+### Build/toolchain experiments (all measured, same 500-deal workload)
+
+| Experiment | Result |
+|---|---|
+| MSVC PGO (`/GL /GENPROFILE` → train on 500 deals → `/USEPROFILE`) | ~139 t/s -- **no gain** (within +/-3% run noise) |
+| `/arch:AVX2` | ~137 t/s -- no gain |
+| clang-cl 22.1.8 `-mavx2` (LLVM 22) | ~138 t/s -- no gain (parity with MSVC; requires the `dll.h` DLLEXPORT fix for clang-cl, now applied) |
+| TT memory 10x (`THREADMEM_LARGE_*` 950-1600 MB/thread) | ~137 t/s -- no gain (TT size is not binding; TT is reset per strain anyway) |
+| Small TT (`--memory 1000`, 30 S threads) | 129 t/s -- slightly worse |
+| 48 / 64 threads (oversubscription) | 127 / 139 t/s -- no gain over 32 |
+| Two 16-thread processes instead of one 32-thread process | ~121 t/s combined -- worse |
+| Pin 16 threads to V-cache CCD vs non-V-cache CCD | 84.8 vs 80.1 t/s -- **+6%** for V-cache pinning (only relevant for half-machine runs) |
+
+### Algorithmic experiment: cross-strain search hints
+
+Instrumentation of `CalcSingleCommon` (2500 boards = 500 deals x 5 strains)
+showed where the time goes:
+
+- First-declarer solve: 66 s CPU (26.5 ms avg), using **3.75 top-level AB
+  passes** on average (distribution: 2500/2489/1770/1186/693/354/162/...).
+- Other 3 declarers (hint-accelerated `SolveSameBoard`): 58 s CPU (7.7 ms avg).
+- Per-pass cost does not decay much (6-9 ms each), so pass count ~ time.
+
+Hypothesis: seed the first-declarer iteration with the already-solved result of
+a sibling strain of the same deal.  Implemented and measured: **no gain**.  The
+hint's accuracy (median error ~1.5-2 tricks vs the true value) is no better
+than the built-in constant guess of 7/6, so the pass count was unchanged
+(9413 → 9372 passes).  Even a *perfect* trick predictor (e.g. a neural network)
+would only reduce passes to 2, an estimated **~24% ceiling** -- measured and
+reverted.
+
+### Conclusion
+
+The batched ddss solver at 32 threads is compute-bound at ~96% CPU with a
+highly tuned alpha-beta core.  No known solver, compiler, or configuration
+change delivers a significant further speedup for exact full-table solving on
+one machine.  The practical levers that remain are:
+
+1. **Horizontal scaling** -- the workload is embarrassingly parallel across
+   machines (~135 tables/s per 16-core box; N boxes = N x throughput).
+2. **Avoiding solves** -- reuse precomputed datasets (GIB, pgx) where the deal
+   set is not required to be fresh.
+3. **Watching the Alberta endgame-database work** (IJCAI 2025) -- the only
+   research direction that credibly promises a multi-x reduction in exact
+   search effort, if/when the databases become distributable.
+
+---
+
+## Three-Way Engine Comparison: ddss vs DDS 2.9 vs DDS 3.0 (2026-07-02)
+
+`dtest --verify` now supports multiple reference engines: `--oob-dll` may be
+repeated, and a `dds3_oob.dll` next to the executable is picked up
+automatically alongside `dds_oob.dll`.  Each engine is loaded dynamically,
+labeled by its own `GetDDSInfo` version string, driven through the same
+batched `CalcAllTablesPBN` API (chunks of 40, upstream struct layout -- shared
+by 2.9 and 3.0), and compared cell-by-cell against ddss and pairwise against
+each other.  Mismatches (if any) go to `oob_mismatches.csv` with
+`engine_a`/`engine_b` columns.
+
+Engines under test:
+
+- **ddss** -- this fork (based on 2.9.0), `CalcAllTablesPBNx`, build-cmake MSVC Release.
+- **dds 2.9.0** -- upstream `dds-bridge/dds` v2.9 DLL (`dds_oob.dll`, built 2026-02).
+- **dds 3.0.0** -- upstream `dds-bridge/dds` develop branch (commit `5cb0fb1`,
+  2026-07), built as `dds_native.dll` via `solution/dds_native.vcxproj`
+  (MSBuild, v143 toolset, C++20).  Note: the checked-in VS project was missing
+  `library/src/system/parallel_boards.cpp`; adding it fixes two unresolved
+  externals (`resolve_worker_count`, `parallel_all_boards_n`).
+
+To reproduce, run `tools/build_oob_dlls.ps1`: it clones both upstream
+versions at the pinned commits, applies the vcxproj fix, builds the DLLs,
+and installs them next to `dtest.exe` as `dds_oob.dll` / `dds3_oob.dll`.
+Then run `dtest --random-deals 1000 --verify`.
+
+### Results (random deals, seed 42, 32 threads, same machine as above)
+
+1000 deals (20,000 cells):
+
+| Engine | Time (ms) | Tables/s | Speed vs ddss | Mismatches |
+|---|---|---|---|---|
+| ddss | 6,956 | 143.8 | 1.00x | - |
+| dds 2.9.0 | 10,268 | 97.4 | 0.68x | 0 |
+| dds 3.0.0 | 16,170 | 61.8 | 0.43x | 0 |
+
+500 deals (10,000 cells): ddss 148.2 t/s, dds 2.9 107.3 t/s (0.72x),
+dds 3.0 62.1 t/s (0.42x).  PBN mode (320 Camrose deals): ddss 124.4 t/s,
+dds 2.9 135.6 t/s (1.09x -- duplicated-deal-heavy set favors upstream's
+duplicate detection timing), dds 3.0 59.6 t/s (0.48x).
+
+Pairwise: dds 2.9 vs dds 3.0 = 0 mismatched cells.  **All three engines agree
+on every cell in every run: PASS.**
+
+### Takeaways
+
+- Correctness: ddss, DDS 2.9, and DDS 3.0 produce identical DD tables
+  (0 mismatches across 20,000+ cells per run, multiple seeds/workloads).
+- Speed: ddss ~1.4x faster than upstream 2.9 batched; upstream **3.0 is ~1.6x
+  slower than 2.9** and ~2.3x slower than ddss on this bulk-table workload.
+  This confirms the earlier assessment: DDS 3.0 is an architectural rewrite
+  (SolverContext, per-instance state), not a performance upgrade, and its
+  legacy batch path is currently slower than 2.9's.
+
+---
+
 ## API Changes vs Upstream DDS 2.9.0
 
 ### Breaking change: `MAXNOOFTABLES` and `MAXNOOFBOARDS` constants

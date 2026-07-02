@@ -22,7 +22,11 @@ test/itest
 # Build directories
 build-*/
 
+# Pinned upstream DDS clones created by tools/build_oob_dlls.ps1
+external/
+
 # Test/benchmark output
+dds_compare_reports/
 test/correctness_*/
 test/dds_compare_reports*/
 test/pbn_reports_*/

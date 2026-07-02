@@ -241,39 +241,37 @@ namespace
     parResults presults[OOB_MAXNOOFTABLES];
   };
 
-  // Solve deals via OOB DLL's batch CalcAllTablesPBN API and compare
-  // against ddss results.  Chunks into groups of OOB_MAXNOOFTABLES (40)
-  // to match the upstream struct layout.
-  // ddssMs is the elapsed time for the ddss solve pass (for comparison).
-  // If oobResultsOut is non-null, the OOB results are stored there.
-  // Returns the number of mismatched cells, or -1 on fatal error.
-  int CompareWithOob(
+  // Result of solving all deals through one reference (OOB) engine.
+  struct OobEngineRun
+  {
+    string label;       // e.g. "dds 2.9.0"
+    string path;        // DLL path
+    double elapsedMs;
+    int errors;         // deals that failed to solve
+    bool ok;            // DLL loaded and batch API available
+    vector<ddTableResults> tables;
+  };
+
+  // Solve all deals via one OOB DLL's batch CalcAllTablesPBN API.
+  // Chunks into groups of OOB_MAXNOOFTABLES (40) to match the
+  // upstream struct layout (shared by DDS 2.9 and DDS 3.0).
+  bool SolveWithOob(
     OobDds& oob,
     const vector<dealPBN>& deals,
-    const vector<ddTableResults>& ddssResults,
     const int nDeals,
-    const double ddssMs,
-    const string& reportDir,
-    const string& csvName,
-    vector<ddTableResults> * oobResultsOut = nullptr)
+    OobEngineRun& run)
   {
+    run.path = oob.Path();
+    run.elapsedMs = 0.0;
+    run.errors = 0;
+    run.ok = false;
+    run.tables.assign(static_cast<size_t>(nDeals), ddTableResults());
+
     if (! oob.IsLoaded())
     {
-      cout << "OOB DLL not loaded\n";
-      return -1;
+      cout << "OOB DLL not loaded: " << oob.Path() << "\n";
+      return false;
     }
-
-    cout << "\n=== OOB Cross-Verification ===\n";
-    cout << "OOB DLL:   " << oob.Path() << "\n";
-    cout << "OOB mode:  batched (CalcAllTablesPBN, chunks of "
-         << OOB_MAXNOOFTABLES << ")\n";
-    cout << "Deals:     " << nDeals << " (" << (nDeals * 20) << " cells)\n";
-
-    if (oobResultsOut)
-      oobResultsOut->resize(static_cast<size_t>(nDeals));
-
-    // Solve all deals via OOB batch API.
-    vector<ddTableResults> oobTables(static_cast<size_t>(nDeals));
 
     auto batchDeals = std::make_unique<OobDdTableDealsPBN>();
     auto batchRes   = std::make_unique<OobDdTablesRes>();
@@ -281,8 +279,6 @@ namespace
 
     const chrono::high_resolution_clock::time_point t0 =
       chrono::high_resolution_clock::now();
-
-    int oobErrors = 0;
 
     for (int i = 0; i < nDeals; i += OOB_MAXNOOFTABLES)
     {
@@ -306,8 +302,9 @@ namespace
 
       if (ret == RETURN_UNKNOWN_FAULT)
       {
-        cout << "FATAL: OOB DLL does not export CalcAllTablesPBN\n";
-        return -1;
+        cout << "FATAL: OOB DLL does not export CalcAllTablesPBN: "
+             << oob.Path() << "\n";
+        return false;
       }
 
       if (ret != RETURN_NO_FAULT)
@@ -316,95 +313,214 @@ namespace
         oob.ErrorMessage(ret, errBuf);
         cout << "OOB CalcAllTablesPBN error at batch offset " << i
              << " (count " << count << "): " << ret << " " << errBuf << "\n";
-        oobErrors += count;
+        run.errors += count;
         for (int j = 0; j < count; j++)
-          memset(&oobTables[static_cast<size_t>(i + j)], 0, sizeof(ddTableResults));
+          memset(&run.tables[static_cast<size_t>(i + j)], 0, sizeof(ddTableResults));
         continue;
       }
 
       for (int j = 0; j < count; j++)
-        oobTables[static_cast<size_t>(i + j)] = batchRes->results[j];
+        run.tables[static_cast<size_t>(i + j)] = batchRes->results[j];
     }
 
     const chrono::high_resolution_clock::time_point t1 =
       chrono::high_resolution_clock::now();
-    const double oobMs =
+    run.elapsedMs =
       chrono::duration_cast<chrono::duration<double, milli> >(t1 - t0).count();
+    run.ok = true;
+    return true;
+  }
 
-    // Compare results cell-by-cell.
-    const string mmPath = reportDir + "/" + csvName;
-    ofstream mm(mmPath.c_str());
-    mm << "deal_idx,combo_idx,strain,declarer,ddss,oob,delta\n";
-
-    int totalMismatches = 0;
-    int totalMatches = 0;
-
+  // Count cell mismatches between two result sets; optionally append
+  // rows to a CSV stream.
+  int CountMismatches(
+    const vector<ddTableResults>& a,
+    const vector<ddTableResults>& b,
+    const int nDeals,
+    ofstream * csv,
+    const string& labelA,
+    const string& labelB)
+  {
+    int mismatches = 0;
     for (int i = 0; i < nDeals; i++)
     {
-      const ddTableResults& got = ddssResults[static_cast<size_t>(i)];
-      const ddTableResults& oobTable = oobTables[static_cast<size_t>(i)];
-
-      if (oobResultsOut)
-        (*oobResultsOut)[static_cast<size_t>(i)] = oobTable;
-
       for (int strain = 0; strain < DDS_STRAINS; strain++)
       {
         for (int declarer = 0; declarer < DDS_HANDS; declarer++)
         {
-          const int a = got.resTable[strain][declarer];
-          const int b = oobTable.resTable[strain][declarer];
-          if (a != b)
+          const int va = a[static_cast<size_t>(i)].resTable[strain][declarer];
+          const int vb = b[static_cast<size_t>(i)].resTable[strain][declarer];
+          if (va != vb)
           {
-            const int idx = 4 * strain + declarer;
-            mm << i << "," << idx << "," << strain << "," << declarer
-               << "," << a << "," << b << "," << (a - b) << "\n";
-            totalMismatches++;
-          }
-          else
-          {
-            totalMatches++;
+            mismatches++;
+            if (csv)
+            {
+              const int idx = 4 * strain + declarer;
+              *csv << labelA << "," << labelB << "," << i << "," << idx
+                   << "," << strain << "," << declarer
+                   << "," << va << "," << vb << "," << (va - vb) << "\n";
+            }
           }
         }
       }
     }
-    mm.close();
+    return mismatches;
+  }
 
-    const double ddssRate = (ddssMs > 0.0) ? (nDeals * 1000.0 / ddssMs) : 0.0;
-    const double oobRate = (oobMs > 0.0) ? (nDeals * 1000.0 / oobMs) : 0.0;
+  // Load every DLL in options.oobDlls, solve all deals with each, and
+  // print a combined timing and correctness comparison against ddss
+  // (and pairwise between the reference engines).
+  // Returns the runs (one per successfully loaded engine).
+  vector<OobEngineRun> RunOobComparisons(
+    const OptionsType& options,
+    const vector<dealPBN>& deals,
+    const vector<ddTableResults>& ddssResults,
+    const int nDeals,
+    const double ddssMs)
+  {
+    vector<OobEngineRun> runs;
 
-    cout << "\n--- Timing ---\n";
-    cout << "  ddss (batched):  " << fixed << setprecision(1) << ddssMs << " ms  ("
-         << setprecision(1) << ddssRate << " tables/s)\n";
-    cout << "  OOB  (batched):  " << fixed << setprecision(1) << oobMs << " ms  ("
-         << setprecision(1) << oobRate << " tables/s)\n";
-    if (oobMs > 0.0 && ddssMs > 0.0)
+    for (size_t d = 0; d < options.oobDlls.size(); d++)
     {
-      const double ratio = oobMs / ddssMs;
-      if (ratio > 1.0)
-        cout << "  ddss is " << setprecision(2) << ratio << "x faster than OOB\n";
-      else if (ratio < 1.0)
-        cout << "  OOB is " << setprecision(2) << (1.0 / ratio) << "x faster than ddss\n";
-      else
-        cout << "  Same speed\n";
+      OobDds oob;
+      if (! oob.Load(options.oobDlls[d]))
+        continue;
+
+      oob.PrintStatus();
+      oob.PrintInfo();
+      oob.SetMaxThreads(options.numThreads);
+
+      OobEngineRun run;
+
+      // Label from the DLL's own version string.
+      DDSInfo info;
+      memset(&info, 0, sizeof(info));
+      oob.GetDDSInfo(&info);
+      run.label = string("dds ") +
+        (info.versionString[0] != '\0' ? info.versionString : "unknown");
+
+      cout << "Solving " << nDeals << " deals with " << run.label
+           << " (" << options.oobDlls[d] << ") ...\n";
+
+      if (! SolveWithOob(oob, deals, nDeals, run))
+        continue;
+
+      cout << "  " << run.label << " solved " << nDeals << " deals in "
+           << fixed << setprecision(1) << run.elapsedMs << " ms ("
+           << (nDeals * 1000.0 / run.elapsedMs) << " tables/s)\n";
+
+      // Disambiguate duplicate labels.
+      int dup = 0;
+      for (size_t k = 0; k < runs.size(); k++)
+        if (runs[k].label.rfind(run.label, 0) == 0)
+          dup++;
+      if (dup > 0)
+      {
+        ostringstream oss;
+        oss << run.label << " #" << (dup + 1);
+        run.label = oss.str();
+      }
+
+      runs.push_back(std::move(run));
+      oob.FreeMemory();
     }
 
+    if (runs.empty())
+    {
+      cout << "No OOB engines available for comparison\n";
+      return runs;
+    }
+
+    // Write all mismatches (vs ddss and pairwise) to one CSV.
+    const string mmPath = options.reportDir + "/oob_mismatches.csv";
+    ofstream mm(mmPath.c_str());
+    mm << "engine_a,engine_b,deal_idx,combo_idx,strain,declarer,a,b,delta\n";
+
     const int totalCells = nDeals * 20;
-    cout << "\n--- Totals ---\n";
-    cout << "  Cells compared: " << totalCells << "\n";
-    cout << "  Matches:        " << totalMatches << "\n";
-    cout << "  Mismatches:     " << totalMismatches << "\n";
-    if (oobErrors > 0)
-      cout << "  OOB errors:     " << oobErrors << "\n";
 
-    if (totalMismatches == 0)
-      cout << "  Result: PASS\n";
+    vector<int> vsDdss(runs.size(), 0);
+    for (size_t k = 0; k < runs.size(); k++)
+      vsDdss[k] = CountMismatches(ddssResults, runs[k].tables, nDeals,
+        &mm, "ddss", runs[k].label);
+
+    // Pairwise between reference engines.
+    vector<string> pairLines;
+    int pairwiseMismatches = 0;
+    for (size_t k = 0; k < runs.size(); k++)
+    {
+      for (size_t l = k + 1; l < runs.size(); l++)
+      {
+        const int mmCount = CountMismatches(runs[k].tables, runs[l].tables,
+          nDeals, &mm, runs[k].label, runs[l].label);
+        pairwiseMismatches += mmCount;
+        ostringstream oss;
+        oss << "  " << runs[k].label << " vs " << runs[l].label
+            << ": " << mmCount << " mismatched cells";
+        pairLines.push_back(oss.str());
+      }
+    }
+    mm.close();
+
+    // Combined summary.
+    cout << "\n=== Engine Comparison Summary ===\n";
+    cout << "Deals: " << nDeals << "   Cells per engine: " << totalCells << "\n\n";
+    cout << left
+         << setw(18) << "Engine"
+         << right
+         << setw(12) << "Time (ms)"
+         << setw(12) << "Tables/s"
+         << setw(14) << "Speed vs ddss"
+         << setw(20) << "Mismatches vs ddss"
+         << "\n";
+
+    const double ddssRate = (ddssMs > 0.0) ? (nDeals * 1000.0 / ddssMs) : 0.0;
+    cout << left << setw(18) << "ddss"
+         << right
+         << setw(12) << fixed << setprecision(1) << ddssMs
+         << setw(12) << setprecision(1) << ddssRate
+         << setw(13) << setprecision(2) << 1.00 << "x"
+         << setw(20) << "-"
+         << "\n";
+
+    int totalVsDdss = 0;
+    int totalErrors = 0;
+    for (size_t k = 0; k < runs.size(); k++)
+    {
+      const OobEngineRun& r = runs[k];
+      const double rate = (r.elapsedMs > 0.0) ? (nDeals * 1000.0 / r.elapsedMs) : 0.0;
+      const double speed = (r.elapsedMs > 0.0) ? (ddssMs / r.elapsedMs) : 0.0;
+      cout << left << setw(18) << r.label
+           << right
+           << setw(12) << fixed << setprecision(1) << r.elapsedMs
+           << setw(12) << setprecision(1) << rate
+           << setw(13) << setprecision(2) << speed << "x"
+           << setw(20) << vsDdss[k]
+           << "\n";
+      totalVsDdss += vsDdss[k];
+      totalErrors += r.errors;
+    }
+
+    if (! pairLines.empty())
+    {
+      cout << "\nPairwise reference-engine checks:\n";
+      for (size_t k = 0; k < pairLines.size(); k++)
+        cout << pairLines[k] << "\n";
+    }
+
+    cout << "\n";
+    if (totalVsDdss == 0 && pairwiseMismatches == 0 && totalErrors == 0)
+      cout << "All engines agree on all " << totalCells << " cells: PASS\n";
     else
-      cout << "  Result: FAIL\n"
-           << "  Mismatches written to: " << mmPath << "\n";
+    {
+      cout << "Result: FAIL ("
+           << totalVsDdss << " mismatches vs ddss, "
+           << pairwiseMismatches << " pairwise mismatches, "
+           << totalErrors << " solve errors)\n"
+           << "Mismatches written to: " << mmPath << "\n";
+    }
+    cout << "=================================\n\n";
 
-    cout << "==============================\n\n";
-
-    return totalMismatches;
+    return runs;
   }
 }
 
@@ -513,17 +629,7 @@ bool RunBackendEvaluation(
 
   // OOB cross-verification if --verify is enabled.
   if (options.verify)
-  {
-    OobDds oob;
-    if (oob.Load(options.oobDll))
-    {
-      oob.PrintStatus();
-      oob.PrintInfo();
-      oob.SetMaxThreads(options.numThreads);
-      CompareWithOob(oob, dealPbns, results, nDeals, elapsedMs,
-        options.reportDir, "oob_mismatches.csv");
-    }
-  }
+    RunOobComparisons(options, dealPbns, results, nDeals, elapsedMs);
 
   return true;
 }
@@ -1160,21 +1266,9 @@ bool RunPbnEvaluation(
          << " mae=" << pMae << " off1=" << pOff1Rate << " off2=" << pOff2Rate << "\n";
 
   // OOB cross-verification if --verify is enabled.
-  bool hasOob = false;
-  vector<ddTableResults> oobResults;
+  vector<OobEngineRun> oobRuns;
   if (options.verify)
-  {
-    OobDds oob;
-    if (oob.Load(options.oobDll))
-    {
-      oob.PrintStatus();
-      oob.PrintInfo();
-      oob.SetMaxThreads(options.numThreads);
-      CompareWithOob(oob, pbnDeals, exact, nDeals, ddssMs,
-        options.reportDir, "oob_mismatches.csv", &oobResults);
-      hasOob = (oobResults.size() == static_cast<size_t>(nDeals));
-    }
-  }
+    oobRuns = RunOobComparisons(options, pbnDeals, exact, nDeals, ddssMs);
 
   const string csvPath = options.reportDir + "/pbn_combined_summary.csv";
   ofstream summary(csvPath.c_str());
@@ -1205,8 +1299,9 @@ bool RunPbnEvaluation(
            << "</style></head><body>";
       html << "<h2>DDS PBN Evaluation Report</h2>";
       html << "<p><b>Source:</b> " << HtmlEscape(options.pbnSource) << "<br>";
-      if (hasOob)
-        html << "<b>OOB DLL:</b> " << HtmlEscape(options.oobDll) << "<br>";
+      for (size_t k = 0; k < oobRuns.size(); k++)
+        html << "<b>" << HtmlEscape(oobRuns[k].label) << ":</b> "
+             << HtmlEscape(oobRuns[k].path) << "<br>";
       html << "<b>Deals:</b> " << nDeals << " &nbsp; <b>Cells:</b> " << numCells << "</p>";
 
       html << "<h3>Per-board Results</h3>";
@@ -1214,8 +1309,8 @@ bool RunPbnEvaluation(
            << "<th>row</th><th>board</th><th>deal</th>"
            << "<th>cpu_exact_dd20</th>"
            << "<th>pbn_ref_dd20</th>";
-      if (hasOob)
-        html << "<th>oob_dd20</th>";
+      for (size_t k = 0; k < oobRuns.size(); k++)
+        html << "<th>" << HtmlEscape(oobRuns[k].label) << "_dd20</th>";
       html << "</tr></thead><tbody>";
       for (int i = 0; i < nDeals; i++)
       {
@@ -1241,10 +1336,10 @@ bool RunPbnEvaluation(
         else
           html << "<td>-</td>";
 
-        if (hasOob)
+        const string ddssStr = TableCompact(exact[static_cast<size_t>(i)]);
+        for (size_t k = 0; k < oobRuns.size(); k++)
         {
-          const string oobStr = TableCompact(oobResults[static_cast<size_t>(i)]);
-          const string ddssStr = TableCompact(exact[static_cast<size_t>(i)]);
+          const string oobStr = TableCompact(oobRuns[k].tables[static_cast<size_t>(i)]);
           const string cls = (oobStr != ddssStr) ? "mono mismatch" : "mono";
           html << "<td class=\"" << cls << "\">"
                << HtmlEscape(oobStr) << "</td>";

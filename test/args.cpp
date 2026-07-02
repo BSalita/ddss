@@ -133,6 +133,8 @@ void Usage(
     "\n" <<
     "-o, --oob-dll p    Path to an OOB (upstream) DDS DLL for\n" <<
     "                   cross-verification of results.\n" <<
+    "                   May be repeated to compare several engines,\n" <<
+    "                   e.g. dds 2.9 and dds 3.0 side by side.\n" <<
     "                   (Default: dds_oob.dll next to this executable)\n" <<
     "\n" <<
     "-v, --verify       Enable OOB cross-verification of DD results.\n" <<
@@ -205,7 +207,7 @@ void SetDefaults()
   options.reportDir = "dds_compare_reports";
   options.pbnSource = "";
   options.htmlReport = "";
-  options.oobDll = "";
+  options.oobDlls.clear();
   options.verify = false;
 }
 
@@ -233,8 +235,11 @@ void PrintOptions()
     (options.pbnSource == "" ? "-" : options.pbnSource) << "\n";
   cout << setw(12) << "html-report" << setw(12) <<
     (options.htmlReport == "" ? "-" : options.htmlReport) << "\n";
-  cout << setw(12) << "oob-dll" << setw(12) <<
-    (options.oobDll == "" ? "-" : options.oobDll) << "\n";
+  if (options.oobDlls.empty())
+    cout << setw(12) << "oob-dll" << setw(12) << "-" << "\n";
+  else
+    for (size_t i = 0; i < options.oobDlls.size(); i++)
+      cout << setw(12) << "oob-dll" << setw(12) << options.oobDlls[i] << "\n";
   cout << setw(12) << "verify" << setw(12) <<
     (options.verify ? "yes" : "no") << "\n";
   cout << "\n" << right;
@@ -393,7 +398,7 @@ void ReadArgs(
         break;
 
       case 'o':
-        options.oobDll = string(optarg);
+        options.oobDlls.push_back(string(optarg));
         break;
 
       case 'v':
@@ -417,7 +422,7 @@ void ReadArgs(
   }
 
   // Resolve default OOB DLL path if --verify is set and --oob-dll was not.
-  if (options.verify && options.oobDll == "")
+  if (options.verify && options.oobDlls.empty())
   {
     // Build the default path: same directory as the executable.
     string exePath(argv[0]);
@@ -428,24 +433,34 @@ void ReadArgs(
 
 #ifdef _WIN32
     const string defaultDll = dir + "dds_oob.dll";
+    const string defaultDll3 = dir + "dds3_oob.dll";
 #else
     const string defaultDll = dir + "dds_oob.so";
+    const string defaultDll3 = dir + "dds3_oob.so";
 #endif
 
     struct stat sb;
     if (stat(defaultDll.c_str(), &sb) == 0)
     {
-      options.oobDll = defaultDll;
+      options.oobDlls.push_back(defaultDll);
       cout << "Using default OOB DLL: " << defaultDll << "\n";
     }
-    else
+
+    // Also pick up a DDS 3.0 DLL if present next to the executable.
+    if (stat(defaultDll3.c_str(), &sb) == 0)
+    {
+      options.oobDlls.push_back(defaultDll3);
+      cout << "Using default OOB DLL: " << defaultDll3 << "\n";
+    }
+
+    if (options.oobDlls.empty())
     {
       cout << "Error: --verify requires an OOB DLL.\n"
            << "  Provide --oob-dll <path> or place "
 #ifdef _WIN32
-           << "dds_oob.dll"
+           << "dds_oob.dll (and optionally dds3_oob.dll)"
 #else
-           << "dds_oob.so"
+           << "dds_oob.so (and optionally dds3_oob.so)"
 #endif
            << " next to the executable.\n"
            << "  Looked for: " << defaultDll << "\n";
@@ -454,6 +469,6 @@ void ReadArgs(
   }
 
   // If --oob-dll was given without --verify, enable verify implicitly.
-  if (options.oobDll != "" && !options.verify)
+  if (! options.oobDlls.empty() && !options.verify)
     options.verify = true;
 }

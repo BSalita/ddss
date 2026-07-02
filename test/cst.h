@@ -11,6 +11,7 @@
 #define DTEST_CST_H
 
 #include <string>
+#include <vector>
 
 using namespace std;
 
@@ -52,7 +53,7 @@ struct OptionsType
   string reportDir;
   string pbnSource;
   string htmlReport;
-  string oobDll;
+  vector<string> oobDlls;
   bool verify;
 };
 
