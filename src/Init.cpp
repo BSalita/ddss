@@ -153,6 +153,17 @@ void STDCALL SetResources(
     noOfSmallThreads = thrMax - noOfLargeThreads;
   }
 
+  if (noOfThreads < 1)
+  {
+    // The resources don't even cover one small thread (e.g. a tiny
+    // maxMemoryMB, or a platform where GetHardware finds no memory).
+    // RegisterParams would reject this configuration anyway; bail out
+    // before freeing the thread memory, which would leave the stale
+    // numThreads pointing at empty slots and crash the next solve in
+    // Memory::GetPtr.
+    return;
+  }
+
   sysdep.RegisterParams(noOfThreads, memMaxMB);
 
   scheduler.RegisterThreads(noOfThreads);
