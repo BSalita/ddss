@@ -55,6 +55,11 @@ struct OptionsType
   string htmlReport;
   vector<string> oobDlls;
   bool verify;
+  // Thread sweep: when max >= min > 0, dtest loops --numthr across the range.
+  // step defaults to 1.  Disabled when max == 0.
+  int threadSweepMin;
+  int threadSweepMax;
+  int threadSweepStep;
 };
 
 #endif

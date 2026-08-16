@@ -79,6 +79,14 @@ int realMain(int argc, char * argv[])
   set_constants();
   main_identify();
 
+  if (options.threadSweepMax > 0)
+  {
+    const bool ok = RunThreadSweep(options);
+    if (! ok)
+      return 1;
+    return 0;
+  }
+
   if (options.randomDeals > 0)
   {
     const bool ok = RunBackendEvaluation(options);

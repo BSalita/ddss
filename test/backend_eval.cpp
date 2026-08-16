@@ -183,9 +183,12 @@ namespace
       chrono::high_resolution_clock::now();
     const double ms =
       chrono::duration_cast<chrono::duration<double, milli> >(t1 - t0).count();
-    cout << progressLabel << " solved " << nDeals
-         << " deals in " << ms << " ms ("
-         << (nDeals * 1000.0 / ms) << " tables/s)\n";
+    if (! progressLabel.empty())
+    {
+      cout << progressLabel << " solved " << nDeals
+           << " deals in " << ms << " ms ("
+           << (nDeals * 1000.0 / ms) << " tables/s)\n";
+    }
 
     if (elapsedMsOut)
       *elapsedMsOut = ms;
@@ -246,8 +249,12 @@ namespace
   {
     string label;       // e.g. "dds 2.9.0"
     string path;        // DLL path
+    string threadMode;  // how the thread cap was applied
+    int threadCap;      // requested maxThreads (0 = auto)
+    int reportedThreads;// GetDDSInfo().noOfThreads after configure
     double elapsedMs;
     int errors;         // deals that failed to solve
+    int mismatchesVsDdss;
     bool ok;            // DLL loaded and batch API available
     vector<ddTableResults> tables;
   };
@@ -255,16 +262,20 @@ namespace
   // Solve all deals via one OOB DLL's batch CalcAllTablesPBN API.
   // Chunks into groups of OOB_MAXNOOFTABLES (40) to match the
   // upstream struct layout (shared by DDS 2.9 and DDS 3.0).
+  // Prefer CalcAllTablesPBNN (dds 3.0) so --numthr actually caps workers;
+  // legacy CalcAllTablesPBN always passes maxThreads=0 (all HW threads).
   bool SolveWithOob(
     OobDds& oob,
     const vector<dealPBN>& deals,
     const int nDeals,
+    const int maxThreads,
     OobEngineRun& run)
   {
     run.path = oob.Path();
     run.elapsedMs = 0.0;
     run.errors = 0;
     run.ok = false;
+    run.threadCap = maxThreads;
     run.tables.assign(static_cast<size_t>(nDeals), ddTableResults());
 
     if (! oob.IsLoaded())
@@ -272,6 +283,9 @@ namespace
       cout << "OOB DLL not loaded: " << oob.Path() << "\n";
       return false;
     }
+
+    const bool usePbnn = oob.HasCalcAllTablesPBNN();
+    run.threadMode = usePbnn ? "CalcAllTablesPBNN" : "SetResources+CalcAllTablesPBN";
 
     auto batchDeals = std::make_unique<OobDdTableDealsPBN>();
     auto batchRes   = std::make_unique<OobDdTablesRes>();
@@ -296,13 +310,18 @@ namespace
       }
 
       int filter[DDS_STRAINS] = {0, 0, 0, 0, 0};
-      const int ret = oob.CalcAllTablesPBNRaw(
-        batchDeals.get(), -1, filter,
-        batchRes.get(), batchPar.get());
+      const int ret = usePbnn
+        ? oob.CalcAllTablesPBNNRaw(
+            batchDeals.get(), -1, filter,
+            batchRes.get(), batchPar.get(), maxThreads)
+        : oob.CalcAllTablesPBNRaw(
+            batchDeals.get(), -1, filter,
+            batchRes.get(), batchPar.get());
 
       if (ret == RETURN_UNKNOWN_FAULT)
       {
-        cout << "FATAL: OOB DLL does not export CalcAllTablesPBN: "
+        cout << "FATAL: OOB DLL does not export CalcAllTablesPBN"
+             << (usePbnn ? "N" : "") << ": "
              << oob.Path() << "\n";
         return false;
       }
@@ -371,12 +390,14 @@ namespace
   // print a combined timing and correctness comparison against ddss
   // (and pairwise between the reference engines).
   // Returns the runs (one per successfully loaded engine).
+  // quiet=true: suppress verbose status/summary (used by --thread-sweep).
   vector<OobEngineRun> RunOobComparisons(
     const OptionsType& options,
     const vector<dealPBN>& deals,
     const vector<ddTableResults>& ddssResults,
     const int nDeals,
-    const double ddssMs)
+    const double ddssMs,
+    const bool quiet = false)
   {
     vector<OobEngineRun> runs;
 
@@ -386,28 +407,47 @@ namespace
       if (! oob.Load(options.oobDlls[d]))
         continue;
 
-      oob.PrintStatus();
-      oob.PrintInfo();
-      oob.SetMaxThreads(options.numThreads);
+      if (! quiet)
+        oob.PrintStatus();
 
       OobEngineRun run;
+      run.reportedThreads = 0;
+      run.mismatchesVsDdss = 0;
 
-      // Label from the DLL's own version string.
+      // dds 2.9: SetResources sets the real worker pool (same as ddss).
+      // dds 3.0: SetMaxThreads is a no-op and SetResources hard-caps the
+      // legacy pool at 1 (and warns); batch workers are capped per call
+      // via CalcAllTablesPBNN instead, so skip SetResources there.
+      if (! oob.HasCalcAllTablesPBNN())
+        oob.SetResources(options.memoryMB, options.numThreads);
+
+      // Label from the DLL's own version string (after resource config).
       DDSInfo info;
       memset(&info, 0, sizeof(info));
       oob.GetDDSInfo(&info);
       run.label = string("dds ") +
         (info.versionString[0] != '\0' ? info.versionString : "unknown");
+      run.reportedThreads = info.noOfThreads;
+      if (! quiet)
+        oob.PrintInfo();
 
-      cout << "Solving " << nDeals << " deals with " << run.label
-           << " (" << options.oobDlls[d] << ") ...\n";
+      if (! quiet)
+      {
+        cout << "Solving " << nDeals << " deals with " << run.label
+             << " (" << options.oobDlls[d] << "), thread cap "
+             << options.numThreads
+             << (options.numThreads <= 0 ? " (auto)" : "") << " ...\n";
+      }
 
-      if (! SolveWithOob(oob, deals, nDeals, run))
+      if (! SolveWithOob(oob, deals, nDeals, options.numThreads, run))
         continue;
 
-      cout << "  " << run.label << " solved " << nDeals << " deals in "
-           << fixed << setprecision(1) << run.elapsedMs << " ms ("
-           << (nDeals * 1000.0 / run.elapsedMs) << " tables/s)\n";
+      if (! quiet)
+      {
+        cout << "  " << run.label << " solved " << nDeals << " deals in "
+             << fixed << setprecision(1) << run.elapsedMs << " ms ("
+             << (nDeals * 1000.0 / run.elapsedMs) << " tables/s)\n";
+      }
 
       // Disambiguate duplicate labels.
       int dup = 0;
@@ -427,21 +467,31 @@ namespace
 
     if (runs.empty())
     {
-      cout << "No OOB engines available for comparison\n";
+      if (! quiet)
+        cout << "No OOB engines available for comparison\n";
       return runs;
     }
 
-    // Write all mismatches (vs ddss and pairwise) to one CSV.
-    const string mmPath = options.reportDir + "/oob_mismatches.csv";
-    ofstream mm(mmPath.c_str());
-    mm << "engine_a,engine_b,deal_idx,combo_idx,strain,declarer,a,b,delta\n";
-
     const int totalCells = nDeals * 20;
+
+    ofstream mm;
+    ofstream * mmPtr = nullptr;
+    string mmPath;
+    if (! quiet)
+    {
+      mmPath = options.reportDir + "/oob_mismatches.csv";
+      mm.open(mmPath.c_str());
+      mm << "engine_a,engine_b,deal_idx,combo_idx,strain,declarer,a,b,delta\n";
+      mmPtr = &mm;
+    }
 
     vector<int> vsDdss(runs.size(), 0);
     for (size_t k = 0; k < runs.size(); k++)
+    {
       vsDdss[k] = CountMismatches(ddssResults, runs[k].tables, nDeals,
-        &mm, "ddss", runs[k].label);
+        mmPtr, "ddss", runs[k].label);
+      runs[k].mismatchesVsDdss = vsDdss[k];
+    }
 
     // Pairwise between reference engines.
     vector<string> pairLines;
@@ -451,7 +501,7 @@ namespace
       for (size_t l = k + 1; l < runs.size(); l++)
       {
         const int mmCount = CountMismatches(runs[k].tables, runs[l].tables,
-          nDeals, &mm, runs[k].label, runs[l].label);
+          nDeals, mmPtr, runs[k].label, runs[l].label);
         pairwiseMismatches += mmCount;
         ostringstream oss;
         oss << "  " << runs[k].label << " vs " << runs[l].label
@@ -459,14 +509,25 @@ namespace
         pairLines.push_back(oss.str());
       }
     }
-    mm.close();
+    if (mmPtr)
+      mm.close();
+
+    if (quiet)
+      return runs;
 
     // Combined summary.
+    DDSInfo ddssInfo;
+    memset(&ddssInfo, 0, sizeof(ddssInfo));
+    GetDDSInfo(&ddssInfo);
+
     cout << "\n=== Engine Comparison Summary ===\n";
-    cout << "Deals: " << nDeals << "   Cells per engine: " << totalCells << "\n\n";
+    cout << "Deals: " << nDeals << "   Cells per engine: " << totalCells
+         << "   Thread cap: " << options.numThreads
+         << (options.numThreads <= 0 ? " (auto)" : "") << "\n\n";
     cout << left
          << setw(18) << "Engine"
          << right
+         << setw(10) << "Threads"
          << setw(12) << "Time (ms)"
          << setw(12) << "Tables/s"
          << setw(14) << "Speed vs ddss"
@@ -476,6 +537,7 @@ namespace
     const double ddssRate = (ddssMs > 0.0) ? (nDeals * 1000.0 / ddssMs) : 0.0;
     cout << left << setw(18) << "ddss"
          << right
+         << setw(10) << ddssInfo.noOfThreads
          << setw(12) << fixed << setprecision(1) << ddssMs
          << setw(12) << setprecision(1) << ddssRate
          << setw(13) << setprecision(2) << 1.00 << "x"
@@ -489,8 +551,14 @@ namespace
       const OobEngineRun& r = runs[k];
       const double rate = (r.elapsedMs > 0.0) ? (nDeals * 1000.0 / r.elapsedMs) : 0.0;
       const double speed = (r.elapsedMs > 0.0) ? (ddssMs / r.elapsedMs) : 0.0;
+      // For dds 3.0, GetDDSInfo reports 1 (legacy pool); real workers are
+      // capped per CalcAllTablesPBNN call, so show the requested cap.
+      const string thrCol = (r.threadMode == "CalcAllTablesPBNN")
+        ? (r.threadCap <= 0 ? string("auto") : to_string(r.threadCap) + "*")
+        : to_string(r.reportedThreads);
       cout << left << setw(18) << r.label
            << right
+           << setw(10) << thrCol
            << setw(12) << fixed << setprecision(1) << r.elapsedMs
            << setw(12) << setprecision(1) << rate
            << setw(13) << setprecision(2) << speed << "x"
@@ -499,6 +567,14 @@ namespace
       totalVsDdss += vsDdss[k];
       totalErrors += r.errors;
     }
+
+    bool anyPbnn = false;
+    for (size_t k = 0; k < runs.size(); k++)
+      if (runs[k].threadMode == "CalcAllTablesPBNN")
+        anyPbnn = true;
+    if (anyPbnn)
+      cout << "\n* dds 3.x worker cap via CalcAllTablesPBNN "
+           << "(GetDDSInfo thread pool stays at 1).\n";
 
     if (! pairLines.empty())
     {
@@ -629,7 +705,233 @@ bool RunBackendEvaluation(
 
   // OOB cross-verification if --verify is enabled.
   if (options.verify)
-    RunOobComparisons(options, dealPbns, results, nDeals, elapsedMs);
+    RunOobComparisons(options, dealPbns, results, nDeals, elapsedMs, false);
+
+  return true;
+}
+
+
+bool RunThreadSweep(
+  const OptionsType& options)
+{
+  if (options.threadSweepMax <= 0 ||
+      options.threadSweepMin < 1 ||
+      options.threadSweepMax < options.threadSweepMin ||
+      options.threadSweepStep < 1)
+  {
+    cout << "Invalid --thread-sweep range\n";
+    return false;
+  }
+
+  if (options.randomDeals <= 0)
+  {
+    cout << "--thread-sweep requires --random-deals > 0\n";
+    return false;
+  }
+
+  if (! MakeDirIfNeeded(options.reportDir))
+  {
+    cout << "Could not create report directory '" << options.reportDir << "'\n";
+    return false;
+  }
+
+  const int nDeals = options.randomDeals;
+  const int thrMin = options.threadSweepMin;
+  const int thrMax = options.threadSweepMax;
+  const int thrStep = options.threadSweepStep;
+
+  cout << "Thread sweep: " << thrMin << ".." << thrMax
+       << " step " << thrStep
+       << "  deals=" << nDeals
+       << "  seed=" << options.randomSeed
+       << (options.verify ? "  verify=on" : "  verify=off")
+       << "\n";
+
+  vector<RandomDeal> deals = GenerateRandomDeals(nDeals, options.randomSeed);
+  vector<dealPBN> dealPbns(static_cast<unsigned>(nDeals));
+  for (int i = 0; i < nDeals; i++)
+    dealPbns[static_cast<unsigned>(i)] = deals[static_cast<unsigned>(i)].deal;
+
+  struct SweepRow
+  {
+    int threads;
+    double ddssMs;
+    double ddssTps;
+    int ddssThreads;
+    double wallSec;
+    vector<OobEngineRun> oob;
+  };
+
+  vector<SweepRow> rows;
+  vector<string> oobLabels; // stable column order from first verify iteration
+
+  const int totalSteps =
+    ((thrMax - thrMin) / thrStep) + 1;
+  int stepIndex = 0;
+
+  for (int thr = thrMin; thr <= thrMax; thr += thrStep)
+  {
+    stepIndex++;
+    OptionsType iter = options;
+    iter.numThreads = thr;
+
+    const chrono::high_resolution_clock::time_point wall0 =
+      chrono::high_resolution_clock::now();
+
+    SetResources(iter.memoryMB, thr);
+
+    vector<ddTableResults> results;
+    double ddssMs = 0.0;
+    if (! SolveCpuExactBatched(dealPbns, nDeals, results, "", &ddssMs))
+    {
+      cout << "  thr=" << thr << " ddss solve failed\n";
+      return false;
+    }
+
+    DDSInfo ddssInfo;
+    memset(&ddssInfo, 0, sizeof(ddssInfo));
+    GetDDSInfo(&ddssInfo);
+
+    SweepRow row;
+    row.threads = thr;
+    row.ddssMs = ddssMs;
+    row.ddssTps = (ddssMs > 0.0) ? (nDeals * 1000.0 / ddssMs) : 0.0;
+    row.ddssThreads = ddssInfo.noOfThreads;
+
+    if (iter.verify)
+    {
+      row.oob = RunOobComparisons(iter, dealPbns, results, nDeals, ddssMs, true);
+      if (oobLabels.empty())
+      {
+        for (size_t k = 0; k < row.oob.size(); k++)
+          oobLabels.push_back(row.oob[k].label);
+      }
+    }
+
+    const chrono::high_resolution_clock::time_point wall1 =
+      chrono::high_resolution_clock::now();
+    row.wallSec = chrono::duration_cast<chrono::duration<double> >(
+      wall1 - wall0).count();
+
+    cout << "[" << setw(3) << stepIndex << "/" << totalSteps
+         << "] thr=" << setw(3) << thr
+         << "  ddss=" << fixed << setprecision(1) << row.ddssTps << " t/s"
+         << "  (configured " << row.ddssThreads << " threads, "
+         << setprecision(1) << row.wallSec << "s)\n";
+
+    rows.push_back(std::move(row));
+  }
+
+  // CSV (portable path separator: forward slash works on Windows too).
+  const string csvPath = options.reportDir + "/thread_sweep_results.csv";
+  ofstream csv(csvPath.c_str());
+  if (! csv)
+  {
+    cout << "Could not write " << csvPath << "\n";
+    return false;
+  }
+
+  csv << "threads,ddss_ms,ddss_tps,ddss_threads,wall_s";
+  for (size_t k = 0; k < oobLabels.size(); k++)
+  {
+    // Sanitize label for a stable column prefix.
+    string prefix = "oob" + to_string(k);
+    csv << "," << prefix << "_label," << prefix << "_ms,"
+        << prefix << "_tps," << prefix << "_threads,"
+        << prefix << "_mismatches";
+  }
+  csv << "\n";
+
+  for (size_t i = 0; i < rows.size(); i++)
+  {
+    const SweepRow& r = rows[i];
+    csv << r.threads
+        << "," << fixed << setprecision(1) << r.ddssMs
+        << "," << r.ddssTps
+        << "," << r.ddssThreads
+        << "," << setprecision(1) << r.wallSec;
+
+    for (size_t k = 0; k < oobLabels.size(); k++)
+    {
+      const OobEngineRun * eng = nullptr;
+      for (size_t j = 0; j < r.oob.size(); j++)
+      {
+        if (r.oob[j].label == oobLabels[k])
+        {
+          eng = &r.oob[j];
+          break;
+        }
+      }
+      if (! eng)
+      {
+        csv << "," << oobLabels[k] << ",,,,";
+        continue;
+      }
+      const double tps = (eng->elapsedMs > 0.0)
+        ? (nDeals * 1000.0 / eng->elapsedMs) : 0.0;
+      const int thrCol = (eng->threadMode == "CalcAllTablesPBNN")
+        ? eng->threadCap : eng->reportedThreads;
+      csv << "," << eng->label
+          << "," << setprecision(1) << eng->elapsedMs
+          << "," << tps
+          << "," << thrCol
+          << "," << eng->mismatchesVsDdss;
+    }
+    csv << "\n";
+  }
+  csv.close();
+
+  // Ranking by ddss tables/s (most optimal first).
+  vector<size_t> order(rows.size());
+  for (size_t i = 0; i < order.size(); i++)
+    order[i] = i;
+  sort(order.begin(), order.end(),
+    [&](size_t a, size_t b)
+    {
+      return rows[a].ddssTps > rows[b].ddssTps;
+    });
+
+  cout << "\n=== Thread Sweep Ranking (by ddss tables/s) ===\n";
+  cout << "Deals: " << nDeals << "   Seed: " << options.randomSeed << "\n\n";
+  cout << left
+       << setw(6) << "Rank"
+       << right
+       << setw(10) << "Threads"
+       << setw(12) << "ddss t/s"
+       << setw(12) << "ddss ms";
+  if (! oobLabels.empty())
+    cout << setw(14) << "vs first OOB";
+  cout << "\n";
+
+  const size_t show = min(order.size(), static_cast<size_t>(40));
+  for (size_t r = 0; r < show; r++)
+  {
+    const SweepRow& row = rows[order[r]];
+    cout << left << setw(6) << (r + 1)
+         << right
+         << setw(10) << row.threads
+         << setw(12) << fixed << setprecision(1) << row.ddssTps
+         << setw(12) << row.ddssMs;
+    if (! row.oob.empty() && row.oob[0].elapsedMs > 0.0)
+    {
+      const double ratio = row.oob[0].elapsedMs / row.ddssMs;
+      cout << setw(13) << setprecision(2) << ratio << "x";
+    }
+    else if (! oobLabels.empty())
+      cout << setw(14) << "-";
+    cout << "\n";
+  }
+  if (order.size() > show)
+    cout << "... (" << (order.size() - show) << " more rows in CSV)\n";
+
+  if (! order.empty())
+  {
+    const SweepRow& best = rows[order[0]];
+    cout << "\nBest: " << best.threads << " threads, "
+         << fixed << setprecision(1) << best.ddssTps << " tables/s\n";
+  }
+  cout << "CSV: " << csvPath << "\n";
+  cout << "==============================================\n\n";
 
   return true;
 }

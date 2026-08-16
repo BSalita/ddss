@@ -47,6 +47,9 @@ typedef int (STDCALL *pfn_CalcAllTables)(
 typedef int (STDCALL *pfn_CalcAllTablesPBN)(
   struct ddTableDealsPBN *, int, int[5],
   struct ddTablesRes *, struct allParResults *);
+// DDS 3.0: CalcAllTablesPBN with explicit worker-thread cap.
+typedef int (STDCALL *pfn_CalcAllTablesPBNN)(
+  void *, int, int[5], void *, void *, int);
 typedef int (STDCALL *pfn_CalcAllTablesPBNx)(
   int, struct ddTableDealPBN[], int, int[5],
   struct ddTableResults[], struct parResults[]);
@@ -156,6 +159,14 @@ public:
   int CalcAllTablesPBNRaw(void * dealsp, int mode,
     int trumpFilter[5], void * resp, void * presp);
 
+  // True if the DLL exports CalcAllTablesPBNN (dds 3.0 thread-capped API).
+  bool HasCalcAllTablesPBNN() const;
+
+  // Same as CalcAllTablesPBNRaw but with an explicit maxThreads cap
+  // (dds 3.0). Returns RETURN_UNKNOWN_FAULT if the export is missing.
+  int CalcAllTablesPBNNRaw(void * dealsp, int mode,
+    int trumpFilter[5], void * resp, void * presp, int maxThreads);
+
   // Batch board solving
   int SolveAllBoards(struct boardsPBN * bop, struct solvedBoards * solvedp);
   int SolveAllBoardsBin(struct boards * bop, struct solvedBoards * solvedp);
@@ -220,6 +231,7 @@ private:
   pfn_CalcDDtablePBN         p_CalcDDtablePBN;
   pfn_CalcAllTables          p_CalcAllTables;
   pfn_CalcAllTablesPBN       p_CalcAllTablesPBN;
+  pfn_CalcAllTablesPBNN      p_CalcAllTablesPBNN;
   pfn_CalcAllTablesPBNx      p_CalcAllTablesPBNx;
   pfn_SolveAllBoards         p_SolveAllBoards;
   pfn_SolveAllBoardsBin      p_SolveAllBoardsBin;

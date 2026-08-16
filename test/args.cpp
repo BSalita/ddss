@@ -14,8 +14,10 @@
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include <sstream>
 #include <vector>
 #include <algorithm>
+#include <cstdio>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -36,7 +38,7 @@ struct optEntry
   unsigned numArgs;
 };
 
-#define DTEST_NUM_OPTIONS 12
+#define DTEST_NUM_OPTIONS 13
 
 const optEntry optList[DTEST_NUM_OPTIONS] =
 {
@@ -51,7 +53,8 @@ const optEntry optList[DTEST_NUM_OPTIONS] =
   {"p", "pbn-source", 1},
   {"w", "html-report", 1},
   {"o", "oob-dll", 1},
-  {"v", "verify", 0}
+  {"v", "verify", 0},
+  {"u", "thread-sweep", 1}
 };
 
 const vector<string> solverList =
@@ -110,8 +113,10 @@ void Usage(
     "                   stl, tbb, stlimpl, pplimpl.\n" <<
     "                   (Default: default meaning that DDS decides)\n" <<
     "\n" <<
-    "-n, --numthr n     Maximum number of threads.\n" <<
-    "                   (Default: 0 meaning that DDS decides)\n" <<
+    "-n, --numthr n     Maximum number of threads for ddss and OOB\n" <<
+    "                   engines under --verify (dds 2.9 via\n" <<
+    "                   SetResources; dds 3.0 via CalcAllTablesPBNN).\n" <<
+    "                   (Default: 0 meaning that each engine auto-picks)\n" <<
     "\n" <<
     "-m, --memory n     Total DDS memory size in MB.\n" <<
     "                   (Default: 0 meaning that DDS decides)\n" <<
@@ -138,8 +143,16 @@ void Usage(
     "                   (Default: dds_oob.dll next to this executable)\n" <<
     "\n" <<
     "-v, --verify       Enable OOB cross-verification of DD results.\n" <<
-    "                   Requires --oob-dll or dds_oob.dll in the\n" <<
+    "                   Requires --oob-dll or dds_oob.dll / .so in the\n" <<
     "                   executable's directory.\n" <<
+    "\n" <<
+    "-u, --thread-sweep SPEC  Sweep --numthr across a range and rank by\n" <<
+    "                   ddss throughput. SPEC is min:max or min:max:step\n" <<
+    "                   (also accepts min-max). Requires --random-deals\n" <<
+    "                   (defaults to 200 if omitted). With --verify,\n" <<
+    "                   OOB engines are timed at each thread count.\n" <<
+    "                   Writes thread_sweep_results.csv under --report-dir.\n" <<
+    "                   Example: --thread-sweep 1:128 --random-deals 200\n" <<
     "\n" <<
     endl;
 }
@@ -209,6 +222,9 @@ void SetDefaults()
   options.htmlReport = "";
   options.oobDlls.clear();
   options.verify = false;
+  options.threadSweepMin = 0;
+  options.threadSweepMax = 0;
+  options.threadSweepStep = 1;
 }
 
 
@@ -242,6 +258,15 @@ void PrintOptions()
       cout << setw(12) << "oob-dll" << setw(12) << options.oobDlls[i] << "\n";
   cout << setw(12) << "verify" << setw(12) <<
     (options.verify ? "yes" : "no") << "\n";
+  if (options.threadSweepMax > 0)
+  {
+    ostringstream sweep;
+    sweep << options.threadSweepMin << ":" << options.threadSweepMax
+          << ":" << options.threadSweepStep;
+    cout << setw(12) << "thr-sweep" << setw(12) << sweep.str() << "\n";
+  }
+  else
+    cout << setw(12) << "thr-sweep" << setw(12) << "-" << "\n";
   cout << "\n" << right;
 }
 
@@ -405,6 +430,35 @@ void ReadArgs(
         options.verify = true;
         break;
 
+      case 'u':
+        {
+          // SPEC: min:max[:step] or min-max[-step]
+          string spec(optarg);
+          for (size_t i = 0; i < spec.size(); i++)
+            if (spec[i] == '-')
+              spec[i] = ':';
+
+          int a = 0, b = 0, step = 1;
+          char sep1 = 0, sep2 = 0;
+          const int n = sscanf(spec.c_str(), "%d%c%d%c%d",
+            &a, &sep1, &b, &sep2, &step);
+          if (n < 3 || sep1 != ':' || a < 1 || b < a ||
+              (n >= 5 && (sep2 != ':' || step < 1)))
+          {
+            cout << "Invalid --thread-sweep SPEC '" << optarg << "'\n"
+                 << "Expected min:max or min:max:step (min >= 1)\n";
+            nextToken -= 2;
+            errFlag = true;
+            break;
+          }
+          if (n < 5)
+            step = 1;
+          options.threadSweepMin = a;
+          options.threadSweepMax = b;
+          options.threadSweepStep = step;
+        }
+        break;
+
       default:
         cout << "Unknown option\n";
         errFlag = true;
@@ -420,6 +474,10 @@ void ReadArgs(
     cout << "Invoke the program without arguments for help" << endl;
     exit(0);
   }
+
+  // Thread sweep defaults: need deals to time; 200 matches the external script.
+  if (options.threadSweepMax > 0 && options.randomDeals <= 0)
+    options.randomDeals = 200;
 
   // Resolve default OOB DLL path if --verify is set and --oob-dll was not.
   if (options.verify && options.oobDlls.empty())

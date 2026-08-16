@@ -27,6 +27,53 @@ extern Memory memory;
 extern ThreadMgr threadMgr;
 
 
+namespace {
+
+// Logical processor count for thread sizing.
+// On Windows, GetSystemInfo only reports the current processor group
+// (max 64). Machines with >64 logical CPUs need GetActiveProcessorCount
+// across ALL_PROCESSOR_GROUPS, else --numthr above 64 is silently capped.
+int DetectLogicalProcessors()
+{
+#if defined(_WIN32) || defined(__CYGWIN__)
+#ifndef ALL_PROCESSOR_GROUPS
+#define ALL_PROCESSOR_GROUPS ((WORD)0xFFFF)
+#endif
+  HMODULE kernel = GetModuleHandleA("kernel32.dll");
+  if (kernel != nullptr)
+  {
+    typedef DWORD (WINAPI * PFN_GetActiveProcessorCount)(WORD);
+    auto gapc = reinterpret_cast<PFN_GetActiveProcessorCount>(
+      GetProcAddress(kernel, "GetActiveProcessorCount"));
+    if (gapc != nullptr)
+    {
+      const DWORD n = gapc(ALL_PROCESSOR_GROUPS);
+      if (n > 0)
+        return static_cast<int>(n);
+    }
+  }
+#endif
+
+  const unsigned hw = thread::hardware_concurrency();
+  if (hw > 0)
+    return static_cast<int>(hw);
+
+#if defined(_WIN32) || defined(__CYGWIN__)
+  SYSTEM_INFO sysinfo;
+  GetSystemInfo(&sysinfo);
+  if (sysinfo.dwNumberOfProcessors > 0)
+    return static_cast<int>(sysinfo.dwNumberOfProcessors);
+#elif defined(__APPLE__) || defined(__linux__)
+  const long n = sysconf(_SC_NPROCESSORS_ONLN);
+  if (n > 0)
+    return static_cast<int>(n);
+#endif
+  return 1;
+}
+
+} // namespace
+
+
 const vector<string> DDS_SYSTEM_PLATFORM =
 {
   "",
@@ -256,9 +303,7 @@ void System::GetHardware(
   kilobytesFree = static_cast<unsigned long long>(
                     statex.ullTotalPhys / 1024);
 
-  SYSTEM_INFO sysinfo;
-  GetSystemInfo(&sysinfo);
-  ncores = static_cast<int>(sysinfo.dwNumberOfProcessors);
+  ncores = DetectLogicalProcessors();
   return;
 #endif
 
@@ -281,7 +326,7 @@ void System::GetHardware(
     kilobytesFree -= 500000;
   }
 
-  ncores = sysconf(_SC_NPROCESSORS_ONLN);
+  ncores = DetectLogicalProcessors();
   return;
 #endif
 
@@ -294,7 +339,7 @@ void System::GetHardware(
   else
     kilobytesFree = 1024 * 1024; // guess 1GB
 
-  ncores = sysconf(_SC_NPROCESSORS_ONLN);
+  ncores = DetectLogicalProcessors();
   return;
 #endif
 }
@@ -804,17 +849,7 @@ string System::GetConstructor(int& cons) const
 
 string System::GetCores(int& cores) const
 {
-#if defined(_WIN32) || defined(__CYGWIN__)
-  SYSTEM_INFO sysinfo;
-  GetSystemInfo(&sysinfo);
-  cores = static_cast<int>(sysinfo.dwNumberOfProcessors);
-#elif defined(__APPLE__) || defined(__linux__)
-  cores = sysconf(_SC_NPROCESSORS_ONLN);
-#endif
-
-  // TODO Think about thread::hardware_concurrency().
-  // This should be standard in C++11.
-
+  cores = DetectLogicalProcessors();
   return to_string(cores);
 }
 

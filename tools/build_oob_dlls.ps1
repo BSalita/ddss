@@ -10,7 +10,8 @@
   automatically for the three-way ddss vs dds 2.9 vs dds 3.0 comparison.
 
 .NOTES
-  Requirements: git, cmake, Visual Studio 2022 with the C++ workload.
+  Requirements: git, cmake (PATH or VS-bundled), Visual Studio 2022/2026
+  with the C++ workload.  Detected via vswhere.
 
   The DDS 3.0 checkout needs a one-line fix: upstream's
   solution/dds_native.vcxproj omits library/src/system/parallel_boards.cpp,
@@ -60,12 +61,31 @@ function Get-PinnedClone([string]$dir, [string]$sha)
 }
 
 
-# Locate the Visual Studio developer environment.
+# Locate the Visual Studio developer environment and matching CMake generator.
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 if (! (Test-Path $vswhere)) { throw "vswhere.exe not found; is Visual Studio installed?" }
-$vsPath = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+$vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (! $vsPath) { throw "Visual Studio with C++ tools not found" }
 $vsDevCmd = Join-Path $vsPath "Common7\Tools\VsDevCmd.bat"
+if (! (Test-Path $vsDevCmd)) { throw "VsDevCmd.bat not found under $vsPath" }
+
+$vsLine = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property catalog_productLineVersion
+switch ("$vsLine") {
+  "18" { $cmakeGen = "Visual Studio 18 2026"; $platformToolset = "v145" }
+  "17" { $cmakeGen = "Visual Studio 17 2022"; $platformToolset = "v143" }
+  default { throw "Unsupported Visual Studio product line: $vsLine (update build_oob_dlls.ps1)" }
+}
+
+$cmake = "cmake"
+if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+  $cmakeCandidate = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+  if (! (Test-Path $cmakeCandidate)) { throw "cmake.exe not found on PATH or under Visual Studio" }
+  $cmake = $cmakeCandidate
+}
+
+Write-Host "Using Visual Studio at $vsPath"
+Write-Host "  CMake generator: $cmakeGen"
+Write-Host "  Platform toolset: $platformToolset"
 
 
 # Run a command inside the VS developer environment (via a temp batch file,
@@ -109,9 +129,85 @@ if(WIN32)
 endif()
 '@ | Set-Content -Path (Join-Path $dir29 "CMakeLists.txt") -Encoding ascii
 
+# Windows processor-group fix: GetSystemInfo caps at 64 logical CPUs.
+# Match ddss DetectLogicalProcessors so --numthr > 64 compares fairly.
+$sys29 = Join-Path $dir29 "src\System.cpp"
+$sys29Text = Get-Content $sys29 -Raw
+if ($sys29Text -notmatch "GetActiveProcessorCount")
+{
+  $oldCores = @'
+string System::GetCores(int& cores) const
+{
+#if defined(_WIN32) || defined(__CYGWIN__)
+  SYSTEM_INFO sysinfo;
+  GetSystemInfo(&sysinfo);
+  cores = static_cast<int>(sysinfo.dwNumberOfProcessors);
+#elif defined(__APPLE__) || defined(__linux__)
+  cores = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+
+  // TODO Think about thread::hardware_concurrency().
+  // This should be standard in C++11.
+
+  return to_string(cores);
+}
+'@
+  $newCores = @'
+string System::GetCores(int& cores) const
+{
+#if defined(_WIN32) || defined(__CYGWIN__)
+#ifndef ALL_PROCESSOR_GROUPS
+#define ALL_PROCESSOR_GROUPS ((WORD)0xFFFF)
+#endif
+  cores = 0;
+  HMODULE kernel = GetModuleHandleA("kernel32.dll");
+  if (kernel != nullptr)
+  {
+    typedef DWORD (WINAPI * PFN_GetActiveProcessorCount)(WORD);
+    auto gapc = reinterpret_cast<PFN_GetActiveProcessorCount>(
+      GetProcAddress(kernel, "GetActiveProcessorCount"));
+    if (gapc != nullptr)
+      cores = static_cast<int>(gapc(ALL_PROCESSOR_GROUPS));
+  }
+  if (cores <= 0)
+  {
+    SYSTEM_INFO sysinfo;
+    GetSystemInfo(&sysinfo);
+    cores = static_cast<int>(sysinfo.dwNumberOfProcessors);
+  }
+#elif defined(__APPLE__) || defined(__linux__)
+  cores = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+
+  return to_string(cores);
+}
+'@
+  if ($sys29Text.Contains($oldCores))
+  {
+    $sys29Text = $sys29Text.Replace($oldCores, $newCores)
+    # GetHardware overwrites ncores with GetSystemInfo after GetCores.
+    $sys29Text = $sys29Text.Replace(
+      "  SYSTEM_INFO sysinfo;`r`n  GetSystemInfo(&sysinfo);`r`n  ncores = static_cast<int>(sysinfo.dwNumberOfProcessors);`r`n  return;",
+      "  (void) System::GetCores(ncores);`r`n  return;")
+    # Also handle LF-only line endings from git.
+    $sys29Text = $sys29Text.Replace(
+      "  SYSTEM_INFO sysinfo;`n  GetSystemInfo(&sysinfo);`n  ncores = static_cast<int>(sysinfo.dwNumberOfProcessors);`n  return;",
+      "  (void) System::GetCores(ncores);`n  return;")
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($sys29, $sys29Text, $utf8)
+    Write-Host "Patched dds 2.9 System.cpp (processor-group aware core count)"
+  }
+  else
+  {
+    Write-Host "WARNING: could not patch dds 2.9 System.cpp core detection"
+  }
+}
+
 Write-Host "`nBuilding dds 2.9 ($dds29Sha)..."
-Invoke-VsDev "cmake -S `"$dir29`" -B `"$dir29\build`" >nul"
-Invoke-VsDev "cmake --build `"$dir29\build`" --config Release --target dds"
+$build29 = Join-Path $dir29 "build"
+if (Test-Path $build29) { Remove-Item -Recurse -Force $build29 }
+Invoke-VsDev "`"$cmake`" -S `"$dir29`" -B `"$build29`" -G `"$cmakeGen`" -A x64 >nul"
+Invoke-VsDev "`"$cmake`" --build `"$build29`" --config Release --target dds"
 
 
 # ---------------- DDS 3.0 ----------------
@@ -133,7 +229,7 @@ if ($xml -notmatch "parallel_boards\.cpp")
 }
 
 Write-Host "`nBuilding dds 3.0 ($dds3Sha)..."
-Invoke-VsDev "msbuild `"$vcxproj`" /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /m /v:minimal /nologo"
+Invoke-VsDev "msbuild `"$vcxproj`" /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$platformToolset /m /v:minimal /nologo"
 
 
 # ---------------- Install next to dtest ----------------

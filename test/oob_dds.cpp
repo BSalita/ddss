@@ -38,6 +38,7 @@ void OobDds::ClearPointers()
   p_CalcDDtablePBN = nullptr;
   p_CalcAllTables = nullptr;
   p_CalcAllTablesPBN = nullptr;
+  p_CalcAllTablesPBNN = nullptr;
   p_CalcAllTablesPBNx = nullptr;
   p_SolveAllBoards = nullptr;
   p_SolveAllBoardsBin = nullptr;
@@ -122,6 +123,7 @@ bool OobDds::Load(const string& path)
 
   p_CalcAllTables          = ResolveSym<pfn_CalcAllTables>("CalcAllTables");
   p_CalcAllTablesPBN       = ResolveSym<pfn_CalcAllTablesPBN>("CalcAllTablesPBN");
+  p_CalcAllTablesPBNN      = ResolveSym<pfn_CalcAllTablesPBNN>("CalcAllTablesPBNN");
   p_CalcAllTablesPBNx      = ResolveSym<pfn_CalcAllTablesPBNx>("CalcAllTablesPBNx");
 
   p_SolveAllBoards         = ResolveSym<pfn_SolveAllBoards>("SolveAllBoards");
@@ -177,6 +179,7 @@ void OobDds::PrintStatus() const
     {"CalcDDtablePBN",         reinterpret_cast<const void *>(p_CalcDDtablePBN)},
     {"CalcAllTables",          reinterpret_cast<const void *>(p_CalcAllTables)},
     {"CalcAllTablesPBN",       reinterpret_cast<const void *>(p_CalcAllTablesPBN)},
+    {"CalcAllTablesPBNN",      reinterpret_cast<const void *>(p_CalcAllTablesPBNN)},
     {"CalcAllTablesPBNx",      reinterpret_cast<const void *>(p_CalcAllTablesPBNx)},
     {"SolveAllBoards",         reinterpret_cast<const void *>(p_SolveAllBoards)},
     {"SolveAllBoardsBin",      reinterpret_cast<const void *>(p_SolveAllBoardsBin)},
@@ -326,6 +329,19 @@ int OobDds::CalcAllTablesPBNRaw(void * dealsp, int mode,
   auto fn = reinterpret_cast<pfn_raw>(
     reinterpret_cast<void(*)()>(p_CalcAllTablesPBN));
   return fn(dealsp, mode, trumpFilter, resp, presp);
+}
+
+bool OobDds::HasCalcAllTablesPBNN() const
+{
+  return p_CalcAllTablesPBNN != nullptr;
+}
+
+int OobDds::CalcAllTablesPBNNRaw(void * dealsp, int mode,
+  int trumpFilter[5], void * resp, void * presp, int maxThreads)
+{
+  if (! p_CalcAllTablesPBNN)
+    return RETURN_UNKNOWN_FAULT;
+  return p_CalcAllTablesPBNN(dealsp, mode, trumpFilter, resp, presp, maxThreads);
 }
 
 int OobDds::CalcAllTablesPBNx(int numDeals, struct ddTableDealPBN dealCards[],
