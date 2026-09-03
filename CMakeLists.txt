@@ -103,6 +103,11 @@ endif()
 
 target_link_libraries(dtest PRIVATE dds)
 
+# Linux/macOS: resolve libdds.so next to dtest without LD_LIBRARY_PATH.
+if(NOT WIN32)
+  set_target_properties(dtest PROPERTIES BUILD_RPATH "$ORIGIN")
+endif()
+
 if(MSVC)
   target_compile_definitions(dtest PRIVATE
     _CRT_SECURE_NO_WARNINGS

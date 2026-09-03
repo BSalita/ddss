@@ -22,6 +22,12 @@ test/itest
 # Build directories
 build-*/
 
+# Checked-in Linux artifact for the postmortem image (optional).
+!dist/
+!dist/linux-x86_64/
+!dist/linux-x86_64/libdds.so
+!dist/linux-x86_64/README.md
+
 # Pinned upstream DDS clones created by tools/build_oob_dlls.ps1
 external/
 

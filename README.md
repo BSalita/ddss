@@ -98,12 +98,40 @@ No `MAXNOOFTABLES`, `MAXNOOFBOARDS`, or stack-size overrides are needed.  One bu
 cmake --build . --config Release
 ```
 
-**Linux:**
+**Linux (local machine, with cmake + g++):**
 ```bash
-cmake -DDDS_THREADING=STL -DDDS_AGGRESSIVE_OPT=ON ..
-make -j$(nproc)
+cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release -DDDS_THREADING=STL
+cmake --build build-linux --target dds dtest -j$(nproc)
+# Output: build-linux/libdds.so  and  build-linux/dtest
 ```
-Requires `pthreads` (for `std::thread`) and `libdl` (for `dlopen`).  Both are auto-detected by CMake.
+
+**Linux (postmortem / wslc `python:3.12-slim`, recommended for the container `.so`):**
+```powershell
+# From this repo on Windows, builds inside a throwaway slim container:
+powershell -ExecutionPolicy Bypass -File tools\build_linux_so.ps1
+```
+```bash
+# Same steps inside Debian/Ubuntu (the script apt-get installs cmake g++ make if missing):
+bash tools/build_linux_so.sh
+python3 tools/smoke_libdds.py dist/linux-x86_64/libdds.so
+./build-linux/dtest --random-deals 5 --seed 42 --numthr 2 --report-dir /tmp/dtest_linux_smoke
+```
+
+Do **not** turn on `DDS_AGGRESSIVE_OPT` for a `.so` shipped in the postmortem image: it adds `-march=native`, which can crash on a different CPU than the build host.  Release already uses `-O3`.
+
+CMake output:
+- `build-linux/libdds.so` (also copied to `dist/linux-x86_64/libdds.so`)
+- `build-linux/dtest`
+
+Runtime deps of `libdds.so` (Debian bookworm / `python:3.12-slim`): `libstdc++.so.6`, `libgcc_s.so.1`, `libm.so.6`, `libpthread` (glibc), `libc.so.6`.  `libdl` is needed by `dtest` (`dlopen` of OOB engines), not by `libdds.so` itself.  All of these are already in `python:3.12-slim`.
+
+`src/ops/deploy_postmortem.ps1` stages this artifact and `Dockerfile.postmortem` installs it as:
+
+```
+COPY libdds.so /usr/local/lib/libdds.so
+```
+
+mlBridge `dds_ddss.py` loads `/usr/local/lib/libdds.so` on Linux (`ctypes.CDLL`, cdecl), with `DDSS_DLL_PATH` as an override.  Fallback search includes `dist/linux-x86_64/libdds.so` and `build-linux/libdds.so` next to this repo.
 
 **macOS:**
 ```bash
