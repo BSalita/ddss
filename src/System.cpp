@@ -317,8 +317,12 @@ void System::GetHardware(
   // the limit for Macs which have  standardized hardware (whereas 
   // say a 32 core Linux server is hardly unusual).
   FILE * fifo = popen("sysctl -n hw.memsize", "r");
-  fscanf(fifo, "%lld", &kilobytesFree);
-  fclose(fifo);
+  if (fifo)
+  {
+    if (fscanf(fifo, "%llu", &kilobytesFree) != 1)
+      kilobytesFree = 0;
+    pclose(fifo);
+  }
 
   kilobytesFree /= 1024;
   if (kilobytesFree > 500000)
